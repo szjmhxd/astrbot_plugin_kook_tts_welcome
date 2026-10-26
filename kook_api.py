@@ -200,3 +200,28 @@ class KookApi:
         if session and not session.closed:
             with contextlib.suppress(Exception):
                 await session.close()
+
+    # ------------------------------------------------------------------ #
+    # 频道与消息
+    # ------------------------------------------------------------------ #
+
+    async def get_channel(self, token: str, channel_id: str) -> dict[str, Any]:
+        """查询频道信息，返回含 ``name`` 的 Channel 对象。"""
+        return await self.request(
+            "GET", "/channel/view", token, params={"channel_id": channel_id}
+        )
+
+    async def send_message(
+        self, token: str, channel_id: str, content: str
+    ) -> dict[str, Any]:
+        """向文字频道发送文本消息。
+
+        KOOK 文本消息（type=1）的 ``content`` 需要是 JSON 字符串
+        ``{"content": "..."}``，这是接口的特殊约定。
+        """
+        payload = {
+            "target_id": channel_id,
+            "content": json.dumps({"content": content}, ensure_ascii=False),
+            "type": 1,
+        }
+        return await self.request("POST", "/message/create", token, payload=payload)

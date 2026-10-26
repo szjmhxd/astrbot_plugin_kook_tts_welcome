@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.1.2"
+PLUGIN_VERSION = "v0.2.0"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -66,9 +66,22 @@ NICKNAME_CACHE_TTL = 3600
 # 每个用户缓存的昵称数量上限（防止无限增长）
 NICKNAME_CACHE_MAX = 2048
 
-# 默认文案模板。占位符：{nickname} 服务器昵称、{username} 用户名、{user_id}
-DEFAULT_ENTER_TEMPLATE = "欢迎 {nickname} 进入语音频道"
+# 默认文案模板。占位符：{nickname} 服务器昵称、{username} 用户名、
+# {user_id} 用户 ID、{channel} 语音频道名称
+DEFAULT_ENTER_TEMPLATE = "欢迎 {nickname} 进入 {channel}"
 DEFAULT_EXIT_TEMPLATE = "再见，{nickname}"
+
+# 文字频道同步播报的默认文案（留空模板 = 关闭对应通知）
+DEFAULT_NOTIFY_ENTER = "{nickname} 进入了语音频道 {channel}"
+DEFAULT_NOTIFY_EXIT = "{nickname} 退出了语音频道 {channel}"
+
+# 多人同时进房时的语音策略
+POLICY_IGNORE = "ignore"  # 播报中 / 冷却中直接忽略后进的
+POLICY_INTERRUPT = "interrupt"  # 后进的打断先进
+POLICY_MERGE = "merge"  # 合并窗口内的人一起播报
+MULTI_USER_POLICIES = (POLICY_IGNORE, POLICY_INTERRUPT, POLICY_MERGE)
+DEFAULT_MULTI_USER_POLICY = POLICY_MERGE
+DEFAULT_MERGE_WINDOW_MS = 2000
 
 # edge-tts 兜底音色
 DEFAULT_EDGE_VOICE = "zh-CN-XiaoxiaoNeural"

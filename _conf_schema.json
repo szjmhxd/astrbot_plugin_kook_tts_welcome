@@ -14,8 +14,8 @@
   "template_enter": {
     "type": "text",
     "description": "进入语音频道播报文案",
-    "hint": "支持占位符：{nickname} 服务器昵称、{username} 用户名、{user_id} 用户 ID。留空表示关闭进入播报。",
-    "default": "欢迎 {nickname} 进入语音频道"
+    "hint": "支持占位符：{nickname} 服务器昵称、{username} 用户名、{user_id} 用户 ID、{channel} 语音频道名。多人合并播报时 {nickname} 会拼成「张三、李四」。留空表示关闭进入播报。",
+    "default": "欢迎 {nickname} 进入 {channel}"
   },
   "template_exit": {
     "type": "text",
@@ -28,6 +28,41 @@
     "description": "播放退出语音",
     "hint": "打开后，成员退出语音频道时播报「退出语音频道播报文案」。",
     "default": false
+  },
+  "multi_user_policy": {
+    "type": "string",
+    "description": "多人同时进房的语音策略",
+    "hint": "merge=窗口内合并成一条播报（推荐）；interrupt=后进的打断正在播的；ignore=只播第一个，后进的忽略。可选值：merge / interrupt / ignore",
+    "default": "merge"
+  },
+  "merge_window_ms": {
+    "type": "int",
+    "description": "合并窗口（毫秒）",
+    "hint": "仅策略为 merge 时生效。从第一个人进房起收集这段时间内的所有人，合并成一条语音播放。",
+    "default": 2000,
+    "slider": {
+      "min": 0,
+      "max": 30000,
+      "step": 100
+    }
+  },
+  "notify_text_channel_id": {
+    "type": "string",
+    "description": "文字播报频道 ID",
+    "hint": "填写文字频道 ID 后，成员进出语音频道时会在该频道发一条文字通知（每条立即发，不受语音策略影响）。留空关闭。",
+    "default": ""
+  },
+  "notify_enter_text": {
+    "type": "text",
+    "description": "文字播报 · 进入文案",
+    "hint": "占位符同语音模板。留空则不发进入通知。",
+    "default": "{nickname} 进入了语音频道 {channel}"
+  },
+  "notify_exit_text": {
+    "type": "text",
+    "description": "文字播报 · 退出文案",
+    "hint": "占位符同语音模板。留空则不发退出通知。",
+    "default": "{nickname} 退出了语音频道 {channel}"
   },
   "edge_voice": {
     "type": "string",

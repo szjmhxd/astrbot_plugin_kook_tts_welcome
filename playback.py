@@ -37,12 +37,17 @@ from .tts import TtsError
 
 @dataclass(slots=True)
 class _PlayRequest:
-    """一次播报请求。``reason`` 为 ``event``（成员状态变化）或 ``preview``。"""
+    """一次播报请求。``reason`` 为 ``event``（成员状态变化）或 ``preview``。
 
-    event: VoiceStateEvent
+    ``events`` 可以是多条（合并播报）；``force`` 为 True 时跳过冷却检查
+    （打断策略产生的请求必须立刻播，不能被冷却拦住）。
+    """
+
+    events: list[VoiceStateEvent]
     reason: str = "event"
     # 试听用：直接指定播报文本，跳过模板渲染
     override_text: str = ""
+    force: bool = False
 
 
 class PlaybackMixin:
@@ -59,6 +64,60 @@ class PlaybackMixin:
                 self._queue.get_nowait()
         with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(request)
+
+    # ------------------------------------------------------------------ #
+    # 多人冲突策略
+    # ------------------------------------------------------------------ #
+
+    def _interrupt_playback(self) -> None:
+        """打断策略：中止当前推流、清空待播队列，为新请求让路。"""
+        self._interrupted = True
+        self._stream_aborted = True
+        while not self._queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._queue.get_nowait()
+        proc = self._ffmpeg_proc
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        logger.info("[KOOK TTS欢迎] 新的进房事件打断了当前播报")
+        self._trace("打断：后进事件中止当前播报")
+
+    def _buffer_for_merge(self, event: VoiceStateEvent) -> None:
+        """合并策略：把事件攒进缓冲区，窗口结束后一次性播报。"""
+        self._merge_buffer.append(event)
+        if self._merge_task is None or self._merge_task.done():
+            self._merge_task = asyncio.create_task(
+                self._merge_flush_loop(),
+                name=f"{PLUGIN_NAME}-merge",
+            )
+
+    async def _merge_flush_loop(self) -> None:
+        """等待合并窗口关闭，把攒下的事件作为一条播报入队。"""
+        window = self._merge_window_ms / 1000.0
+        if window > 0:
+            await asyncio.sleep(window)
+
+        while self._merge_buffer:
+            # 播报中 / 队列已占 / 冷却中：继续攒着，稍后再投递
+            if self._playing or not self._queue.empty():
+                await asyncio.sleep(0.2)
+                continue
+            if (
+                self._last_finished
+                and time.monotonic() - self._last_finished < self._cooldown
+            ):
+                await asyncio.sleep(0.2)
+                continue
+
+            events = self._merge_buffer[:]
+            self._merge_buffer.clear()
+            self._enqueue(_PlayRequest(events=events))
+            names = "、".join(e.user_id for e in events)
+            logger.info(
+                f"[KOOK TTS欢迎] 合并播报 {len(events)} 人（{names}），准备播放"
+            )
+            self._trace(f"合并播报入队：{len(events)} 人 user={names}")
 
     async def _worker_loop(self) -> None:
         """串行消费播报请求，保证同一时间只有一次推流。"""
@@ -114,15 +173,20 @@ class PlaybackMixin:
 
     async def _play_request(self, request: _PlayRequest) -> None:
         """一次完整的播报流程，由 worker 调用，异常不应逃逸。"""
-        event = request.event
+        if not request.events:
+            self._trace("跳过：播报请求没有事件")
+            return
+        event = request.events[0]
         channel_id = event.channel_id
         self._trace(
             f"开始播报流程：state={event.state} channel={channel_id} "
-            f"user={event.user_id} reason={request.reason}"
+            f"user={event.user_id} n={len(request.events)} "
+            f"reason={request.reason} force={request.force}"
         )
 
         if (
             request.reason == "event"
+            and not request.force
             and time.monotonic() - self._last_finished < self._cooldown
         ):
             logger.debug("[KOOK TTS欢迎] 冷却未结束，跳过本次播报")
@@ -147,14 +211,17 @@ class PlaybackMixin:
         await self._ensure_bot_id(token)
 
         # 无文案直接跳过，避免白白占用语音频道
-        if not request.override_text and not (
-            self._custom_template(event.user_id, event.state)
-            or self._state_template(event.state)
-        ):
-            self._trace(f"跳过：状态 {event.state} 未配置播报文案")
-            return
+        if not request.override_text:
+            single_user = event.user_id if len(request.events) == 1 else ""
+            if not (
+                (single_user and self._custom_template(single_user, event.state))
+                or self._state_template(event.state)
+            ):
+                self._trace(f"跳过：状态 {event.state} 未配置播报文案")
+                return
 
         self._stream_aborted = False
+        self._interrupted = False
 
         # ---- 音频准备与加入频道并行，压缩事件到开播的延迟 ---- #
         join_done_at: list[float] = []
@@ -263,15 +330,18 @@ class PlaybackMixin:
         返回 ``(播报文本, 推流文件, 总时长, 语音时长, 尾部静音秒)``。
         与「加入语音频道」并行执行，因此这里的耗时大部分被入房过程掩盖。
         """
-        event = request.event
+        events = request.events
+        event = events[0]
         t0 = time.monotonic()
 
         speak_text = request.override_text
         if not speak_text:
-            names = await self._resolve_display_name(
-                token, event.user_id, event.guild_id
+            names = await self._resolve_many_names(token, events)
+            channel_name = await self._resolve_channel_name(token, event.channel_id)
+            single_user = event.user_id if len(events) == 1 else ""
+            speak_text = self._build_speak_text(
+                event.state, single_user, names, channel_name
             )
-            speak_text = self._build_speak_text(event.state, event.user_id, names)
         if not speak_text:
             raise TtsError("未配置播报文案")
         t1 = time.monotonic()
@@ -354,7 +424,11 @@ class PlaybackMixin:
             self._ffmpeg_proc = None
         elapsed = time.monotonic() - started
 
-        if self._stream_aborted:
+        if self._interrupted:
+            logger.info("[KOOK TTS欢迎] 播报已被新的进房事件打断")
+            self._trace(f"推流中止：被新事件打断（用时 {elapsed:.1f}s）")
+            self._interrupted = False
+        elif self._stream_aborted:
             logger.info("[KOOK TTS欢迎] 机器人已离开语音频道，推流被中止")
             self._trace(f"推流中止：机器人不在频道内（用时 {elapsed:.1f}s）")
         elif timed_out:

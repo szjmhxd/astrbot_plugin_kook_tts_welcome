@@ -34,6 +34,7 @@ from .constants import (
     TTS_TEXT_MAX_CHARS,
     USER_TEMPLATES_FILE_NAME,
 )
+from .hooking import VoiceStateEvent
 from .kook_api import KookApiError
 from .utils import to_text
 
@@ -74,6 +75,55 @@ class TtsMixin:
         self._remember_nickname(cache_key, info)
         return info
 
+    async def _resolve_many_names(
+        self, token: str, events: list[VoiceStateEvent]
+    ) -> dict[str, str]:
+        """解析一批事件的显示名。
+
+        单人返回普通昵称字典；多人用「、」拼接，用于合并播报。
+        """
+        if len(events) == 1:
+            item = events[0]
+            return await self._resolve_display_name(token, item.user_id, item.guild_id)
+
+        nicknames: list[str] = []
+        usernames: list[str] = []
+        for item in events:
+            info = await self._resolve_display_name(token, item.user_id, item.guild_id)
+            nicknames.append(
+                info.get("nickname") or info.get("username") or item.user_id
+            )
+            usernames.append(
+                info.get("username") or info.get("nickname") or item.user_id
+            )
+        return {
+            "nickname": "、".join(nicknames),
+            "username": "、".join(usernames),
+        }
+
+    async def _resolve_channel_name(self, token: str, channel_id: str) -> str:
+        """查询语音频道名称，带 TTL 缓存；失败时回退为「语音频道」。"""
+        if not channel_id:
+            return "语音频道"
+        cached = self._channel_cache.get(channel_id)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < NICKNAME_CACHE_TTL:
+            return cached[1]
+
+        name = ""
+        try:
+            channel = await self._api.get_channel(token, channel_id)
+            name = to_text(channel.get("name"))
+        except KookApiError as exc:
+            logger.debug(f"[KOOK TTS欢迎] 查询频道 {channel_id} 名称失败：{exc}")
+            self._trace(f"查询频道名称失败：channel={channel_id} {exc}")
+
+        name = name or "语音频道"
+        self._channel_cache[channel_id] = (time.monotonic(), name)
+        while len(self._channel_cache) > NICKNAME_CACHE_MAX:
+            self._channel_cache.popitem(last=False)
+        return name
+
     async def _prefetch_nickname(self, user_id: str, guild_id: str = "") -> None:
         """事件到达后立刻预取昵称，与队列调度并行，减少 worker 启动后的等待。"""
         token = self._resolve_token()
@@ -107,6 +157,7 @@ class TtsMixin:
         template: str,
         user_id: str,
         names: dict[str, str],
+        channel_name: str = "",
     ) -> str:
         """把模板渲染成最终播报文本。"""
         nickname = names.get("nickname") or names.get("username") or user_id
@@ -114,6 +165,7 @@ class TtsMixin:
         text = template.replace("{nickname}", nickname)
         text = text.replace("{username}", username)
         text = text.replace("{user_id}", user_id)
+        text = text.replace("{channel}", channel_name or "语音频道")
         text = " ".join(text.split())
         return text[:TTS_TEXT_MAX_CHARS].strip()
 
@@ -139,12 +191,20 @@ class TtsMixin:
         state: str,
         user_id: str,
         names: dict[str, str],
+        channel_name: str = "",
     ) -> str:
-        """合成播报文本：用户定制文案优先，其次状态模板。"""
-        template = self._custom_template(user_id, state) or self._state_template(state)
+        """合成播报文本：单人时用户定制文案优先，其次状态模板。
+
+        合并播报（多事件）时 ``user_id`` 传空串，跳过单人定制文案。
+        """
+        template = ""
+        if user_id:
+            template = self._custom_template(user_id, state)
+        if not template:
+            template = self._state_template(state)
         if not template:
             return ""
-        return self._render_text(template, user_id, names)
+        return self._render_text(template, user_id, names, channel_name)
 
     # ------------------------------------------------------------------ #
     # TTS 合成

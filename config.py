@@ -13,8 +13,13 @@ from astrbot.api.star import StarTools
 
 from .constants import (
     DEFAULT_LEAVE_DELAY,
+    DEFAULT_MERGE_WINDOW_MS,
+    DEFAULT_MULTI_USER_POLICY,
+    DEFAULT_NOTIFY_ENTER,
+    DEFAULT_NOTIFY_EXIT,
     DEFAULT_START_DELAY_MS,
     LOG_MAX_BYTES,
+    MULTI_USER_POLICIES,
     PLUGIN_NAME,
     PLUGIN_VERSION,
 )
@@ -84,6 +89,30 @@ class ConfigMixin:
     def _start_delay_ms(self) -> int:
         """入房到开播的最短间隔（毫秒）。"""
         return self._conf_int("start_delay_ms", DEFAULT_START_DELAY_MS, 0, 10000)
+
+    @property
+    def _multi_user_policy(self) -> str:
+        """多人同时进房时的语音策略：ignore / interrupt / merge。"""
+        value = self._conf_str("multi_user_policy", DEFAULT_MULTI_USER_POLICY).lower()
+        return value if value in MULTI_USER_POLICIES else DEFAULT_MULTI_USER_POLICY
+
+    @property
+    def _merge_window_ms(self) -> int:
+        """合并播报的收集窗口（毫秒）。"""
+        return self._conf_int("merge_window_ms", DEFAULT_MERGE_WINDOW_MS, 0, 30000)
+
+    @property
+    def _notify_text_channel_id(self) -> str:
+        """文字同步播报的目标文字频道 ID（空 = 关闭）。"""
+        return self._conf_str("notify_text_channel_id")
+
+    @property
+    def _notify_enter_text(self) -> str:
+        return self._conf_str("notify_enter_text", DEFAULT_NOTIFY_ENTER)
+
+    @property
+    def _notify_exit_text(self) -> str:
+        return self._conf_str("notify_exit_text", DEFAULT_NOTIFY_EXIT)
 
     @property
     def _leave_delay(self) -> int:

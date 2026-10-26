@@ -48,6 +48,9 @@ from .constants import (
     DEFAULT_EXIT_TEMPLATE,
     PLUGIN_NAME,
     PLUGIN_VERSION,
+    POLICY_IGNORE,
+    POLICY_INTERRUPT,
+    POLICY_MERGE,
     STATE_ENTER,
     STATE_EXIT,
     STATES_WITH_EVENTS,
@@ -102,7 +105,13 @@ class KookTtsWelcomePlugin(
         self._nickname_cache: OrderedDict[str, tuple[float, dict[str, str]]] = (
             OrderedDict()
         )
+        self._channel_cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._user_templates: dict[str, Any] = self._load_user_templates()
+
+        # 合并播报缓冲与调度
+        self._merge_buffer: list[VoiceStateEvent] = []
+        self._merge_task: asyncio.Task | None = None
+        self._interrupted = False
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -127,11 +136,13 @@ class KookTtsWelcomePlugin(
         for platform_id in list(self._hooks):
             self._detach(platform_id)
 
-        for task in (self._attach_task, self._worker, self._ffmpeg_task):
+        for task in (self._attach_task, self._worker, self._ffmpeg_task, self._merge_task):
             if task and not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        self._merge_task = None
+        self._merge_buffer.clear()
 
         token = self._resolve_token()
         channel = self._voice_channel
@@ -180,9 +191,6 @@ class KookTtsWelcomePlugin(
         if event.state not in STATES_WITH_EVENTS:
             self._trace(f"忽略：状态 {event.state} 暂无网关事件来源")
             return
-        if event.state == STATE_EXIT and not self._play_exit:
-            self._trace("忽略：退出播报未开启")
-            return
 
         self._trace(
             f"收到语音事件：state={event.state} user={event.user_id} "
@@ -195,6 +203,41 @@ class KookTtsWelcomePlugin(
             self._trace(f"忽略：频道 {event.channel_id} 不是目标频道 {target}")
             return
 
+        # 文字频道同步播报：独立于语音开关与策略，按人立即发送
+        self._dispatch_text_notify(event)
+
+        if event.state == STATE_EXIT and not self._play_exit:
+            self._trace("忽略：退出语音播报未开启")
+            return
+
+        policy = self._multi_user_policy
+
+        # 合并策略：攒够窗口一次性播报
+        if policy == POLICY_MERGE:
+            self._buffer_for_merge(event)
+            asyncio.create_task(
+                self._prefetch_nickname(event.user_id, event.guild_id),
+                name=f"{PLUGIN_NAME}-prefetch",
+            )
+            return
+
+        # 打断策略：后进的立刻顶掉先进
+        if policy == POLICY_INTERRUPT:
+            if self._playing or not self._queue.empty():
+                self._interrupt_playback()
+            self._enqueue(_PlayRequest(events=[event], force=True))
+            logger.info(
+                f"[KOOK TTS欢迎] 用户 {event.user_id} {event.state} 语音频道 "
+                f"{event.channel_id}，打断并播报"
+            )
+            self._trace(f"打断策略入队：state={event.state} user={event.user_id}")
+            asyncio.create_task(
+                self._prefetch_nickname(event.user_id, event.guild_id),
+                name=f"{PLUGIN_NAME}-prefetch",
+            )
+            return
+
+        # 忽略策略（默认保守行为）：播报中 / 冷却中的事件直接丢弃
         if self._playing or not self._queue.empty():
             logger.debug("[KOOK TTS欢迎] 正在播报中，忽略新的语音事件")
             self._trace("忽略：正在播报中")
@@ -205,7 +248,7 @@ class KookTtsWelcomePlugin(
             self._trace("忽略：仍在冷却时间内")
             return
 
-        self._enqueue(_PlayRequest(event=event))
+        self._enqueue(_PlayRequest(events=[event]))
         logger.info(
             f"[KOOK TTS欢迎] 用户 {event.user_id} {event.state} 语音频道 "
             f"{event.channel_id}，准备播报"
@@ -217,6 +260,45 @@ class KookTtsWelcomePlugin(
             self._prefetch_nickname(event.user_id, event.guild_id),
             name=f"{PLUGIN_NAME}-prefetch",
         )
+
+    def _dispatch_text_notify(self, event: VoiceStateEvent) -> None:
+        """把语音动作同步到文字频道（每条事件立即发，不参与合并）。"""
+        if not self._notify_text_channel_id:
+            return
+        template = (
+            self._notify_enter_text
+            if event.state == STATE_ENTER
+            else self._notify_exit_text
+        )
+        if not template:
+            return
+        asyncio.create_task(
+            self._send_text_notify(event, template),
+            name=f"{PLUGIN_NAME}-notify",
+        )
+
+    async def _send_text_notify(self, event: VoiceStateEvent, template: str) -> None:
+        """渲染并发送一条文字频道通知。"""
+        token = self._resolve_token()
+        if not token:
+            return
+        try:
+            names = await self._resolve_display_name(
+                token, event.user_id, event.guild_id
+            )
+            channel_name = await self._resolve_channel_name(token, event.channel_id)
+            text = self._render_text(
+                template, event.user_id, names, channel_name
+            )
+            if not text:
+                return
+            await self._api.send_message(
+                token, self._notify_text_channel_id, text
+            )
+            self._trace(f"文字通知已发送：{text}")
+        except Exception as exc:
+            logger.warning(f"[KOOK TTS欢迎] 文字频道通知失败：{exc}")
+            self._trace(f"文字通知失败：{exc!r}")
 
     @filter.on_platform_loaded()
     async def _on_platform_loaded(self) -> None:
@@ -242,6 +324,13 @@ class KookTtsWelcomePlugin(
         else:
             state = "空闲"
 
+        policy_label = {
+            POLICY_IGNORE: "忽略后进的",
+            POLICY_INTERRUPT: "后进的打断",
+            POLICY_MERGE: f"合并（窗口 {self._merge_window_ms}ms）",
+        }.get(self._multi_user_policy, self._multi_user_policy)
+        notify = self._notify_text_channel_id or "（未开启）"
+
         lines = [
             "🎧 KOOK TTS 语音欢迎",
             f"插件状态：{'已启用' if self._enabled else '已关闭'}",
@@ -249,6 +338,8 @@ class KookTtsWelcomePlugin(
             f"进入文案：{self._state_template(STATE_ENTER) or '（未配置）'}",
             f"退出文案：{self._state_template(STATE_EXIT) or '（未配置）'}"
             + ("" if self._play_exit else "［退出播报已关闭］"),
+            f"多人策略：{policy_label}",
+            f"文字播报频道：{notify}",
             f"定制用户：{len(self._user_templates)} 人",
             f"音量：{self._volume} / 冷却：{self._cooldown} 秒",
             f"入房间隔：{self._start_delay_ms} 毫秒 / 尾部静音：{self._leave_delay} 秒",
@@ -278,9 +369,14 @@ class KookTtsWelcomePlugin(
             "· /语音欢迎试听 [文案] —— 合成一段语音并在频道里试听",
             "· /语音欢迎重载 —— 重新读取配置与定制文案",
             "",
-            "模板占位符：{nickname} 服务器昵称 / {username} 用户名 / {user_id}",
+            "模板占位符：{nickname} 服务器昵称 / {username} 用户名 / {user_id} / {channel} 频道名",
             f"默认进入模板：{DEFAULT_ENTER_TEMPLATE}",
             f"默认退出模板：{DEFAULT_EXIT_TEMPLATE}",
+            "",
+            "多人同时进房策略（插件设置里切换）：",
+            "· merge —— 窗口内合并成一条「欢迎 A、B 进入 …」",
+            "· interrupt —— 后进的打断正在播的",
+            "· ignore —— 只播第一个，后进的忽略",
             "",
             "注意：KOOK 网关只推送「进入 / 退出」语音频道事件，",
             "静音 / 闭麦状态官方无事件可监听（详见 README）。",
@@ -398,12 +494,14 @@ class KookTtsWelcomePlugin(
             guild_id = ""
 
         request = _PlayRequest(
-            event=VoiceStateEvent(
-                state=STATE_ENTER,
-                user_id=str(user_id or "0"),
-                channel_id=channel_id,
-                guild_id=guild_id,
-            ),
+            events=[
+                VoiceStateEvent(
+                    state=STATE_ENTER,
+                    user_id=str(user_id or "0"),
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                )
+            ],
             reason="preview",
             override_text=speak,
         )
