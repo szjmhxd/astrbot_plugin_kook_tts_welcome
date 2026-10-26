@@ -1,0 +1,4 @@
+# 网络请求用 aiohttp（AstrBot 本体已内置，此处显式声明）
+aiohttp>=3.8
+# edge-tts 为可选兜底 TTS 引擎：已配置 AstrBot 语音合成提供商时可不装
+edge-tts>=6.1

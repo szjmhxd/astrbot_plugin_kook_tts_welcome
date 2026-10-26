@@ -1,0 +1,108 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用语音欢迎",
+    "hint": "关闭后不再响应语音频道状态事件，管理指令仍然可用。",
+    "default": true
+  },
+  "target_channel_id": {
+    "type": "string",
+    "description": "目标语音频道 ID",
+    "hint": "留空表示自动跟随事件中的语音频道；填写后只对该频道生效。",
+    "default": ""
+  },
+  "template_enter": {
+    "type": "text",
+    "description": "进入语音频道播报文案",
+    "hint": "支持占位符：{nickname} 服务器昵称、{username} 用户名、{user_id} 用户 ID。留空表示关闭进入播报。",
+    "default": "欢迎 {nickname} 进入语音频道"
+  },
+  "template_exit": {
+    "type": "text",
+    "description": "退出语音频道播报文案",
+    "hint": "占位符同上。需要同时打开下方「播放退出语音」才会生效。",
+    "default": "再见，{nickname}"
+  },
+  "play_exit": {
+    "type": "bool",
+    "description": "播放退出语音",
+    "hint": "打开后，成员退出语音频道时播报「退出语音频道播报文案」。",
+    "default": false
+  },
+  "edge_voice": {
+    "type": "string",
+    "description": "edge-tts 音色",
+    "hint": "仅当未配置 AstrBot 语音合成提供商、由 edge-tts 兜底合成时使用。例如 zh-CN-XiaoxiaoNeural、zh-CN-YunxiNeural。",
+    "default": "zh-CN-XiaoxiaoNeural"
+  },
+  "volume": {
+    "type": "int",
+    "description": "播放音量",
+    "hint": "0 - 100，100 表示原始音量。",
+    "default": 100,
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "cooldown": {
+    "type": "int",
+    "description": "触发冷却（秒）",
+    "hint": "播报结束后的等待时间。KOOK 要求退出语音频道后等待 2 - 3 秒才能重新加入，建议不低于 3 秒。",
+    "default": 3,
+    "slider": {
+      "min": 0,
+      "max": 60,
+      "step": 1
+    }
+  },
+  "start_delay": {
+    "type": "int",
+    "description": "加入频道后等待（秒）",
+    "hint": "给听众客户端建立语音接收的时间，建议 2 秒。",
+    "default": 2,
+    "slider": {
+      "min": 0,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "leave_delay": {
+    "type": "int",
+    "description": "播放结束后停留（秒）",
+    "hint": "音频末尾附加的静音时长，避免 RTP 流一断、服务端丢弃缓冲中的音频。建议 2 秒。",
+    "default": 2,
+    "slider": {
+      "min": 0,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "ffmpeg_path": {
+    "type": "string",
+    "description": "FFmpeg 路径",
+    "hint": "默认从系统 PATH 查找 ffmpeg；也可以填写可执行文件的绝对路径。",
+    "default": "ffmpeg"
+  },
+  "diagnostic_log": {
+    "type": "bool",
+    "description": "写入诊断日志",
+    "hint": "把运行流程与错误写入 data/plugin_data/astrbot_plugin_kook_tts_welcome/logs/，便于排查问题。日志不包含 Bot Token。",
+    "default": true
+  },
+  "bot_token": {
+    "type": "string",
+    "description": "KOOK Bot Token（可选）",
+    "hint": "留空时自动读取 AstrBot 中 KOOK 适配器的 Token。",
+    "default": "",
+    "secret": true
+  },
+  "voice_password": {
+    "type": "string",
+    "description": "语音频道密码（可选）",
+    "hint": "仅当目标语音频道设置了密码时填写。",
+    "default": "",
+    "secret": true
+  }
+}
