@@ -25,20 +25,29 @@
 KOOK 网关系统消息（type=255, extra.type=joined_channel）
         │  user_id / channel_id 从 extra.body 取出
         ▼
-排除自己（bot_id）→ 频道过滤 → 防抖 / 冷却 / 队列
+排除自己（bot_id）→ 频道过滤 → 防抖 / 冷却 / 队列 → 预取昵称（并行）
+        │
+        ├─────────────── 并行 ───────────────┐
+        ▼                                    ▼
+GET /user/view → 昵称                  POST /voice/join
+        │                                    │
+        ▼                                    │
+渲染文案 → TTS 合成（带缓存）                 │
+        │                                    │
+        ▼                                    │
+尾部静音拼接 → 时长校验                        │
+        └─────────────── 汇合 ───────────────┘
         │
         ▼
-GET /api/v3/user/view  →  nickname / username（带缓存）
-        │
-        ▼
-渲染文案（用户定制 > 状态模板）→ TTS 合成（Provider > edge-tts）
-        │
-        ▼
-POST /api/v3/voice/join  →  等 2 秒  →  FFmpeg Opus RTP 推流
+入房后至少 0.5 秒（准备工作更久则自动吸收）→ FFmpeg Opus RTP 推流
         │                               （尾部拼 2 秒静音，单条 RTP 流）
         ▼
 POST /api/v3/voice/leave  →  冷却 3 秒，处理下一次事件
 ```
+
+延迟优化：音频准备（昵称 / TTS / 拼接）与加入语音频道**并行**执行；入房到开播的
+最短间隔默认 0.5 秒，且会被 TTS 等准备工作耗时自动吸收，因此事件到开播的整体
+延迟约等于 TTS 合成时间（同一句话命中缓存后接近 1 秒内）。
 
 ## 环境要求
 
@@ -68,7 +77,7 @@ POST /api/v3/voice/leave  →  冷却 3 秒，处理下一次事件
 | 退出播报文案 | `再见，{nickname}` | 需同时打开「播放退出语音」 |
 | 播放退出语音 | 关 | |
 | edge-tts 音色 | `zh-CN-XiaoxiaoNeural` | 仅 edge-tts 兜底时使用 |
-| 播放音量 / 冷却 / 启动延迟 / 尾部停留 | 100 / 3s / 2s / 2s | |
+| 播放音量 / 冷却 / 入房间隔 / 尾部停留 | 100 / 3s / 0.5s / 2s | 入房间隔是入房到开播的最短等待，准备工作更久时自动吸收 |
 | FFmpeg 路径 | `ffmpeg` | 未进 PATH 时填绝对路径 |
 
 ## 指令

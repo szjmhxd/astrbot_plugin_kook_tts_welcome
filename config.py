@@ -49,6 +49,17 @@ class ConfigMixin:
         value = to_int(self.config.get(key, default), default)
         return max(minimum, min(maximum, value))
 
+    def _conf_float(
+        self, key: str, default: float, minimum: float, maximum: float
+    ) -> float:
+        """读取浮点配置并夹在 [minimum, maximum] 区间内。"""
+        raw = self.config.get(key, default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float(default)
+        return max(minimum, min(maximum, value))
+
     # ------------------------------------------------------------------ #
     # 常用配置
     # ------------------------------------------------------------------ #
@@ -70,8 +81,8 @@ class ConfigMixin:
         return self._conf_int("volume", 100, 0, 100)
 
     @property
-    def _start_delay(self) -> int:
-        return self._conf_int("start_delay", DEFAULT_START_DELAY, 0, 10)
+    def _start_delay(self) -> float:
+        return self._conf_float("start_delay", DEFAULT_START_DELAY, 0.0, 10.0)
 
     @property
     def _leave_delay(self) -> int:

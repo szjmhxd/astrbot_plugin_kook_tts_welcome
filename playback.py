@@ -1,7 +1,8 @@
 """播报流程（Mixin）。
 
 完整流程：查昵称 → 渲染文案 → TTS 合成 → 校验 FFmpeg → 加入语音频道 →
-保活 → 延迟启动 → FFmpeg RTP 推流 → 离开频道。同时负责：
+保活 → 延迟启动 → FFmpeg RTP 推流 → 离开频道。其中「音频准备」与「加入
+语音频道」并行执行，压缩事件到开播的整体延迟。同时负责：
 
 - 播放请求队列与 worker 循环（同一时间只播一条）；
 - 机器人被移出频道时立刻中止推流；
@@ -145,36 +146,46 @@ class PlaybackMixin:
 
         await self._ensure_bot_id(token)
 
-        # ---- 昵称 → 文案 → 合成 ------------------------------------ #
-        speak_text = request.override_text
-        if not speak_text:
-            names = await self._resolve_display_name(
-                token, event.user_id, event.guild_id
-            )
-            speak_text = self._build_speak_text(event.state, event.user_id, names)
-        if not speak_text:
+        # 无文案直接跳过，避免白白占用语音频道
+        if not request.override_text and not (
+            self._custom_template(event.user_id, event.state)
+            or self._state_template(event.state)
+        ):
             self._trace(f"跳过：状态 {event.state} 未配置播报文案")
             return
 
-        try:
-            audio_path = await self.synthesize(speak_text)
-        except TtsError as exc:
-            logger.error(f"[KOOK TTS欢迎] 语音合成失败：{exc}")
-            self._trace(f"失败：TTS 合成（{exc}）")
-            return
-
-        # 先把「播放结束后停留」的静音拼进音频，整段播放只保留一条 RTP 流
-        stream_path = await self._prepare_stream_audio(audio_path)
-
-        # 先校验音频再加入频道：坏文件不应该先占住语音频道
-        duration = await probe_audio_duration(self._ffmpeg_executable(), stream_path)
-        if duration is None and ffprobe_available(self._ffmpeg_executable()):
-            logger.error(f"[KOOK TTS欢迎] 无法解析音频（可能已损坏）：{audio_path}")
-            self._trace(f"失败：音频无法解析 {audio_path}")
-            return
-
         self._stream_aborted = False
-        info = await self._join_voice(token, channel_id)
+
+        # ---- 音频准备与加入频道并行，压缩事件到开播的延迟 ---- #
+        join_done_at: list[float] = []
+
+        async def _join_and_stamp() -> VoiceJoinInfo:
+            info = await self._join_voice(token, channel_id)
+            join_done_at.append(time.monotonic())
+            return info
+
+        parallel_started = time.monotonic()
+        audio_task = asyncio.create_task(
+            self._prepare_audio_bundle(request, token),
+            name=f"{PLUGIN_NAME}-audio",
+        )
+        join_task = asyncio.create_task(
+            _join_and_stamp(),
+            name=f"{PLUGIN_NAME}-join",
+        )
+        audio_result, join_result = await asyncio.gather(
+            audio_task, join_task, return_exceptions=True
+        )
+        parallel_ms = (time.monotonic() - parallel_started) * 1000
+
+        if isinstance(join_result, BaseException):
+            if isinstance(join_result, asyncio.CancelledError):
+                raise join_result
+            logger.error(f"[KOOK TTS欢迎] 加入语音频道失败：{join_result}")
+            self._trace(f"失败：加入语音频道（{join_result!r}）")
+            return
+
+        info = join_result
         self._voice_channel = channel_id
         logger.info(
             f"[KOOK TTS欢迎] 已加入语音频道 {channel_id}"
@@ -182,22 +193,43 @@ class PlaybackMixin:
         )
         self._trace(
             f"加入语音频道成功：channel={channel_id} media={info.ip}:{info.port} "
-            f"bitrate={info.bitrate} ssrc={info.audio_ssrc} pt={info.audio_pt}"
+            f"bitrate={info.bitrate} ssrc={info.audio_ssrc} pt={info.audio_pt} "
+            f"并行准备={parallel_ms:.0f}ms"
         )
+
+        if isinstance(audio_result, BaseException):
+            if isinstance(audio_result, asyncio.CancelledError):
+                raise audio_result
+            logger.error(f"[KOOK TTS欢迎] 语音准备失败：{audio_result}")
+            self._trace(f"失败：音频准备（{audio_result!r}）")
+            with contextlib.suppress(Exception):
+                await self._leave_voice(token, channel_id)
+            return
+
+        speak_text, stream_path, duration = audio_result
 
         keepalive = asyncio.create_task(
             self._keepalive_loop(token, channel_id),
             name=f"{PLUGIN_NAME}-keepalive",
         )
         try:
-            start_delay = self._start_delay
-            if start_delay > 0:
+            # start_delay 是「入房 → 开播」的最短间隔；若准备工作已经耗掉
+            # 这段时间（TTS 比入房慢），就不再额外等待。
+            waited = (
+                time.monotonic() - join_done_at[0] if join_done_at else 0.0
+            )
+            effective_delay = max(0.0, self._start_delay - waited)
+            if effective_delay >= 0.05:
                 logger.info(
-                    f"[KOOK TTS欢迎] 等待 {start_delay} 秒后开始播放，"
+                    f"[KOOK TTS欢迎] 等待 {effective_delay:.1f} 秒后开始播放，"
                     "给听众客户端建立语音接收的时间"
                 )
-                self._trace(f"启动延迟：{start_delay}s")
-                await asyncio.sleep(start_delay)
+                self._trace(f"启动延迟：{effective_delay:.2f}s（配置 {self._start_delay}s）")
+                await asyncio.sleep(effective_delay)
+            else:
+                self._trace(
+                    f"启动延迟已被准备工作吸收（等待 {waited * 1000:.0f}ms）"
+                )
 
             if self._stream_aborted:
                 self._trace("启动前收到机器人退出事件，取消本次播放")
@@ -217,6 +249,48 @@ class PlaybackMixin:
             with contextlib.suppress(Exception):
                 await asyncio.shield(self._leave_voice(token, channel_id))
             self._stream_aborted = False
+
+    async def _prepare_audio_bundle(
+        self, request: _PlayRequest, token: str
+    ) -> tuple[str, Path, float | None]:
+        """昵称 → 文案 → TTS → 尾部静音 → 时长探测，返回可推流的音频。
+
+        与「加入语音频道」并行执行，因此这里的耗时大部分被入房过程掩盖。
+        """
+        event = request.event
+        t0 = time.monotonic()
+
+        speak_text = request.override_text
+        if not speak_text:
+            names = await self._resolve_display_name(
+                token, event.user_id, event.guild_id
+            )
+            speak_text = self._build_speak_text(event.state, event.user_id, names)
+        if not speak_text:
+            raise TtsError("未配置播报文案")
+        t1 = time.monotonic()
+
+        audio_path = await self.synthesize(speak_text)
+        t2 = time.monotonic()
+
+        # 先把「播放结束后停留」的静音拼进音频，整段播放只保留一条 RTP 流
+        stream_path = await self._prepare_stream_audio(audio_path)
+        t3 = time.monotonic()
+
+        duration = await probe_audio_duration(self._ffmpeg_executable(), stream_path)
+        if duration is None and ffprobe_available(self._ffmpeg_executable()):
+            raise TtsError(f"音频无法解析（可能已损坏）：{audio_path}")
+        t4 = time.monotonic()
+
+        self._trace(
+            "音频准备完成："
+            f"文案={1000 * (t1 - t0):.0f}ms "
+            f"TTS={1000 * (t2 - t1):.0f}ms "
+            f"尾部静音={1000 * (t3 - t2):.0f}ms "
+            f"探测={1000 * (t4 - t3):.0f}ms "
+            f"合计={1000 * (t4 - t0):.0f}ms"
+        )
+        return speak_text, stream_path, duration
 
     async def _stream_audio(
         self,

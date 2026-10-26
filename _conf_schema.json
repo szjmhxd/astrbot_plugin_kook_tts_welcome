@@ -58,14 +58,14 @@
     }
   },
   "start_delay": {
-    "type": "int",
-    "description": "加入频道后等待（秒）",
-    "hint": "给听众客户端建立语音接收的时间，建议 2 秒。",
-    "default": 2,
+    "type": "float",
+    "description": "入房到开播的最短间隔（秒）",
+    "hint": "给听众客户端建立语音接收的时间。默认 0.5 秒；若播报开头偶尔被截断，可调大到 1 - 2 秒。TTS 等准备工作耗时更久时，这段间隔会被自动吸收。",
+    "default": 0.5,
     "slider": {
       "min": 0,
       "max": 10,
-      "step": 1
+      "step": 0.1
     }
   },
   "leave_delay": {

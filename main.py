@@ -212,6 +212,12 @@ class KookTtsWelcomePlugin(
         )
         self._trace(f"已加入播报队列：state={event.state} user={event.user_id}")
 
+        # 预取昵称：与队列调度并行，worker 启动时多半已命中缓存
+        asyncio.create_task(
+            self._prefetch_nickname(event.user_id, event.guild_id),
+            name=f"{PLUGIN_NAME}-prefetch",
+        )
+
     @filter.on_platform_loaded()
     async def _on_platform_loaded(self) -> None:
         """平台适配器加载完成后立即尝试挂接。"""

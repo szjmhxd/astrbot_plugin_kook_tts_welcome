@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import time
@@ -72,6 +73,14 @@ class TtsMixin:
 
         self._remember_nickname(cache_key, info)
         return info
+
+    async def _prefetch_nickname(self, user_id: str, guild_id: str = "") -> None:
+        """事件到达后立刻预取昵称，与队列调度并行，减少 worker 启动后的等待。"""
+        token = self._resolve_token()
+        if not token or not user_id:
+            return
+        with contextlib.suppress(Exception):
+            await self._resolve_display_name(token, user_id, guild_id)
 
     def _remember_nickname(self, key: str, info: dict[str, str]) -> None:
         """写入昵称缓存，超出上限时淘汰最旧记录。"""
