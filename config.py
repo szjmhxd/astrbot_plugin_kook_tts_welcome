@@ -12,12 +12,16 @@ from astrbot.api import logger
 from astrbot.api.star import StarTools
 
 from .constants import (
+    DEFAULT_ENTER_TEMPLATE,
+    DEFAULT_EXIT_TEMPLATE,
     DEFAULT_LEAVE_DELAY,
     DEFAULT_MERGE_WINDOW_MS,
     DEFAULT_MULTI_USER_POLICY,
     DEFAULT_NOTIFY_ENTER,
     DEFAULT_NOTIFY_EXIT,
     DEFAULT_START_DELAY_MS,
+    LEGACY_ENTER_TEMPLATE,
+    LEGACY_EXIT_TEMPLATE,
     LOG_MAX_BYTES,
     MULTI_USER_POLICIES,
     PLUGIN_NAME,
@@ -158,34 +162,66 @@ class ConfigMixin:
     def _log_startup(self) -> None:
         """在 AstrBot 日志与诊断日志里输出启动配置摘要。"""
         channel = self._target_channel or "自动跟随事件频道"
+        notify_id = self._notify_text_channel_id
+        notify_desc = notify_id if notify_id else "未开启（语音动作不会同步到文字频道）"
         summary = (
             f"已加载 {PLUGIN_VERSION}：启用={self._enabled}，监听频道={channel}，"
             f"退出播报={'开' if self._play_exit else '关'}，"
             f"音量={self._volume}，冷却={self._cooldown}s，"
-            f"启动延迟={self._start_delay_ms}ms，尾部静音={self._leave_delay}s"
+            f"启动延迟={self._start_delay_ms}ms，尾部静音={self._leave_delay}s，"
+            f"文字播报频道={notify_desc}"
         )
         logger.info(f"[KOOK TTS欢迎] {summary}")
         self._trace(f"插件加载：{summary}")
         self._trace(f"数据目录：{self._data_dir}")
         self._trace(f"诊断日志：{self._log_file}")
+        if not notify_id:
+            logger.info(
+                "[KOOK TTS欢迎] 文字播报未开启：在你想同步的文字频道里发送 "
+                "/语音欢迎文字频道 当前 即可开启"
+            )
+
+    def _migrate_config(self) -> None:
+        """把历史版本写入配置的旧默认文案升级为带 {channel} 的新默认。
+
+        只在当前值与旧默认**完全一致**时替换；用户自己改过的文案不动。
+        """
+        migrations = (
+            ("template_enter", LEGACY_ENTER_TEMPLATE, DEFAULT_ENTER_TEMPLATE),
+            ("template_exit", LEGACY_EXIT_TEMPLATE, DEFAULT_EXIT_TEMPLATE),
+        )
+        changed = False
+        for key, legacy, new in migrations:
+            if self._conf_str(key) == legacy:
+                self.config[key] = new
+                changed = True
+                logger.info(
+                    f"[KOOK TTS欢迎] 已升级默认文案 {key}：「{legacy}」→「{new}」"
+                )
+                self._trace(f"配置迁移：{key} 「{legacy}」→「{new}」")
+        if changed:
+            self._save_config("升级默认文案")
 
     def _trace(self, message: str) -> None:
         """把诊断信息追加到插件日志文件（不含 Bot Token）。"""
         if not self._conf_bool("diagnostic_log", True):
             return
+        log_file = getattr(self, "_log_file", None)
+        if log_file is None:
+            return
         try:
-            self._log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.parent.mkdir(parents=True, exist_ok=True)
             if (
-                self._log_file.exists()
-                and self._log_file.stat().st_size > LOG_MAX_BYTES
+                log_file.exists()
+                and log_file.stat().st_size > LOG_MAX_BYTES
             ):
-                backup = self._log_file.with_name(f"{self._log_file.name}.1")
+                backup = log_file.with_name(f"{log_file.name}.1")
                 with contextlib.suppress(OSError):
                     if backup.exists():
                         backup.unlink()
-                    self._log_file.rename(backup)
+                    log_file.rename(backup)
             stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            with self._log_file.open("a", encoding="utf-8") as handle:
+            with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(f"[{stamp}] {message}\n")
         except OSError:
             pass

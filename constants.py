@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.2.0"
+PLUGIN_VERSION = "v0.2.1"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -69,7 +69,12 @@ NICKNAME_CACHE_MAX = 2048
 # 默认文案模板。占位符：{nickname} 服务器昵称、{username} 用户名、
 # {user_id} 用户 ID、{channel} 语音频道名称
 DEFAULT_ENTER_TEMPLATE = "欢迎 {nickname} 进入 {channel}"
-DEFAULT_EXIT_TEMPLATE = "再见，{nickname}"
+DEFAULT_EXIT_TEMPLATE = "再见，{nickname}，离开 {channel}"
+
+# 历史版本写入用户配置的旧默认文案。启动时若与之完全一致则自动升级为
+# 上面的新默认（带 {channel}），用户改过的文案不受影响。
+LEGACY_ENTER_TEMPLATE = "欢迎 {nickname} 进入语音频道"
+LEGACY_EXIT_TEMPLATE = "再见，{nickname}"
 
 # 文字频道同步播报的默认文案（留空模板 = 关闭对应通知）
 DEFAULT_NOTIFY_ENTER = "{nickname} 进入了语音频道 {channel}"

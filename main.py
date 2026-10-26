@@ -119,6 +119,7 @@ class KookTtsWelcomePlugin(
 
     async def initialize(self) -> None:
         """启动后台任务，并尝试挂接已经加载的 KOOK 适配器。"""
+        self._migrate_config()
         self._log_startup()
         self._worker = asyncio.create_task(
             self._worker_loop(), name=f"{PLUGIN_NAME}-worker"
@@ -366,6 +367,7 @@ class KookTtsWelcomePlugin(
             "· /语音欢迎模板 enter|exit <文案> —— 设置状态播报模板",
             "· /语音欢迎定制 <用户ID> enter|exit <文案> —— 指定用户定制文案",
             "· /语音欢迎定制删除 <用户ID> —— 删除该用户的定制文案",
+            "· /语音欢迎文字频道 当前|<频道ID>|关闭 —— 进出动作同步到文字频道",
             "· /语音欢迎试听 [文案] —— 合成一段语音并在频道里试听",
             "· /语音欢迎重载 —— 重新读取配置与定制文案",
             "",
@@ -386,6 +388,84 @@ class KookTtsWelcomePlugin(
     # ------------------------------------------------------------------ #
     # 指令：管理员
     # ------------------------------------------------------------------ #
+
+    @filter.command("语音欢迎文字频道")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    async def cmd_notify_channel(self, event: AstrMessageEvent):
+        """设置文字播报频道：/语音欢迎文字频道 当前|<频道ID>|关闭"""
+        parts = self._strip_command(event.message_str, "语音欢迎文字频道")
+        arg = parts[0].strip() if parts else "当前"
+
+        if arg in ("关闭", "关", "off", "disable", "none"):
+            self.config["notify_text_channel_id"] = ""
+            saved = self._save_config("关闭文字播报")
+            yield event.plain_result(
+                f"{'已关闭' if saved else '保存失败'}文字频道同步播报"
+            )
+            return
+
+        if arg in ("当前", "here", "this"):
+            channel_id = self._current_text_channel_id(event)
+            if not channel_id:
+                yield event.plain_result(
+                    "无法识别当前文字频道 ID，请直接指定：/语音欢迎文字频道 <频道ID>"
+                )
+                return
+        elif arg.isdigit():
+            channel_id = arg
+        else:
+            yield event.plain_result(
+                "用法：/语音欢迎文字频道 当前｜<频道ID>｜关闭\n"
+                "「当前」= 绑定你发这条指令所在的文字频道"
+            )
+            return
+
+        self.config["notify_text_channel_id"] = channel_id
+        saved = self._save_config("设置文字播报频道")
+        if not saved:
+            yield event.plain_result("保存配置失败，请查看日志")
+            return
+
+        # 立刻发一条测试消息，验证机器人在该频道的发言权限
+        test_text = "✅ 文字频道同步播报已开启，成员进出语音频道会在这里通知"
+        sent = False
+        token = self._resolve_token()
+        if token:
+            try:
+                await self._api.send_message(token, channel_id, test_text)
+                sent = True
+            except Exception as exc:
+                logger.warning(f"[KOOK TTS欢迎] 文字播报测试消息发送失败：{exc}")
+                self._trace(f"文字播报测试消息失败：{exc!r}")
+
+        yield event.plain_result(
+            f"已设置文字播报频道：{channel_id}\n"
+            + (
+                "测试消息已发送 ✅"
+                if sent
+                else "⚠️ 测试消息发送失败：请确认机器人在该频道有发言权限"
+            )
+        )
+
+    @staticmethod
+    def _current_text_channel_id(event: AstrMessageEvent) -> str:
+        """从指令事件里取当前文字频道 ID（KOOK 的 group_id / session_id 即频道 ID）。"""
+        for getter_name in ("get_group_id", "get_channel_id"):
+            getter = getattr(event, getter_name, None)
+            if callable(getter):
+                try:
+                    value = str(getter() or "").strip()
+                except Exception:
+                    value = ""
+                if value and value not in ("unknown", "0"):
+                    return value
+        message_obj = getattr(event, "message_obj", None)
+        for attr in ("group_id", "session_id", "channel_id"):
+            value = str(getattr(message_obj, attr, "") or "").strip()
+            if value and value not in ("unknown", "0"):
+                return value
+        return ""
 
     @filter.command("语音欢迎模板")
     @filter.permission_type(filter.PermissionType.ADMIN)

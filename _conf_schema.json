@@ -21,7 +21,7 @@
     "type": "text",
     "description": "退出语音频道播报文案",
     "hint": "占位符同上。需要同时打开下方「播放退出语音」才会生效。",
-    "default": "再见，{nickname}"
+    "default": "再见，{nickname}，离开 {channel}"
   },
   "play_exit": {
     "type": "bool",
@@ -49,7 +49,7 @@
   "notify_text_channel_id": {
     "type": "string",
     "description": "文字播报频道 ID",
-    "hint": "填写文字频道 ID 后，成员进出语音频道时会在该频道发一条文字通知（每条立即发，不受语音策略影响）。留空关闭。",
+    "hint": "填写文字频道 ID 后，成员进出语音频道时会在该频道发一条文字通知（每条立即发，不受语音策略影响）。推荐直接在目标文字频道发送 /语音欢迎文字频道 当前 一键绑定。留空关闭。",
     "default": ""
   },
   "notify_enter_text": {
