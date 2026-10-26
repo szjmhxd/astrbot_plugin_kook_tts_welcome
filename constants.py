@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.1.1"
+PLUGIN_VERSION = "v0.1.2"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -44,9 +44,9 @@ STATES_WITH_EVENTS = frozenset({STATE_ENTER, STATE_EXIT})
 VOICE_KEEP_ALIVE_INTERVAL = 40
 # /voice/leave 之后需要等待 2-3 秒才能重新加入
 STALE_VOICE_RELEASE_WAIT = 3
-# 加入频道后到开始播放之间的最短间隔（秒）。听众客户端需要一点时间建立
+# 加入频道后到开始播放之间的最短间隔（毫秒）。听众客户端需要一点时间建立
 # 语音接收；若 TTS 等准备工作耗时更久，这段时间会被自动吸收，不再额外等待。
-DEFAULT_START_DELAY = 0.5
+DEFAULT_START_DELAY_MS = 500
 # 音频末尾附加静音的时长（预拼进音频，保证整段只有一条 RTP 流）
 DEFAULT_LEAVE_DELAY = 2
 # FFmpeg 播放超时余量（秒）

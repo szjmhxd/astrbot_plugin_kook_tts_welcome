@@ -61,8 +61,8 @@ def build_ffmpeg_args(
         "-ar",
         "48000",
     ]
-    if volume != 100:
-        args += ["-filter:a", f"volume={volume / 100:.2f}"]
+    # 音量始终显式生效（1.00 = 原始音量），方便在设置中调节并保持行为一致
+    args += ["-filter:a", f"volume={volume / 100:.2f}"]
     args += ["-f", "tee", build_rtp_tee(info)]
     return args
 

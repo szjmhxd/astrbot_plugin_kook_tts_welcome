@@ -206,29 +206,32 @@ class PlaybackMixin:
                 await self._leave_voice(token, channel_id)
             return
 
-        speak_text, stream_path, duration = audio_result
+        speak_text, stream_path, duration, speech_duration, tail_seconds = audio_result
 
         keepalive = asyncio.create_task(
             self._keepalive_loop(token, channel_id),
             name=f"{PLUGIN_NAME}-keepalive",
         )
         try:
-            # start_delay 是「入房 → 开播」的最短间隔；若准备工作已经耗掉
+            # start_delay_ms 是「入房 → 开播」的最短间隔；若准备工作已经耗掉
             # 这段时间（TTS 比入房慢），就不再额外等待。
             waited = (
                 time.monotonic() - join_done_at[0] if join_done_at else 0.0
             )
-            effective_delay = max(0.0, self._start_delay - waited)
+            effective_delay = max(0.0, self._start_delay_ms / 1000.0 - waited)
             if effective_delay >= 0.05:
                 logger.info(
-                    f"[KOOK TTS欢迎] 等待 {effective_delay:.1f} 秒后开始播放，"
+                    f"[KOOK TTS欢迎] 等待 {effective_delay * 1000:.0f} 毫秒后开始播放，"
                     "给听众客户端建立语音接收的时间"
                 )
-                self._trace(f"启动延迟：{effective_delay:.2f}s（配置 {self._start_delay}s）")
+                self._trace(
+                    f"启动延迟：{effective_delay * 1000:.0f}ms"
+                    f"（配置 {self._start_delay_ms}ms）"
+                )
                 await asyncio.sleep(effective_delay)
             else:
                 self._trace(
-                    f"启动延迟已被准备工作吸收（等待 {waited * 1000:.0f}ms）"
+                    f"启动延迟已被准备工作吸收（入房后已过 {waited * 1000:.0f}ms）"
                 )
 
             if self._stream_aborted:
@@ -240,6 +243,8 @@ class PlaybackMixin:
                 info,
                 display_name=speak_text,
                 duration=duration,
+                speech_duration=speech_duration,
+                tail_seconds=tail_seconds,
             )
         finally:
             keepalive.cancel()
@@ -252,9 +257,10 @@ class PlaybackMixin:
 
     async def _prepare_audio_bundle(
         self, request: _PlayRequest, token: str
-    ) -> tuple[str, Path, float | None]:
+    ) -> tuple[str, Path, float | None, float | None, float]:
         """昵称 → 文案 → TTS → 尾部静音 → 时长探测，返回可推流的音频。
 
+        返回 ``(播报文本, 推流文件, 总时长, 语音时长, 尾部静音秒)``。
         与「加入语音频道」并行执行，因此这里的耗时大部分被入房过程掩盖。
         """
         event = request.event
@@ -274,9 +280,15 @@ class PlaybackMixin:
         t2 = time.monotonic()
 
         # 先把「播放结束后停留」的静音拼进音频，整段播放只保留一条 RTP 流
+        tail_seconds = float(self._leave_delay)
         stream_path = await self._prepare_stream_audio(audio_path)
+        if stream_path == audio_path:
+            tail_seconds = 0.0
         t3 = time.monotonic()
 
+        speech_duration = await probe_audio_duration(
+            self._ffmpeg_executable(), audio_path
+        )
         duration = await probe_audio_duration(self._ffmpeg_executable(), stream_path)
         if duration is None and ffprobe_available(self._ffmpeg_executable()):
             raise TtsError(f"音频无法解析（可能已损坏）：{audio_path}")
@@ -290,7 +302,7 @@ class PlaybackMixin:
             f"探测={1000 * (t4 - t3):.0f}ms "
             f"合计={1000 * (t4 - t0):.0f}ms"
         )
-        return speak_text, stream_path, duration
+        return speak_text, stream_path, duration, speech_duration, tail_seconds
 
     async def _stream_audio(
         self,
@@ -298,6 +310,8 @@ class PlaybackMixin:
         info: VoiceJoinInfo,
         display_name: str = "",
         duration: float | None = None,
+        speech_duration: float | None = None,
+        tail_seconds: float = 0.0,
     ) -> None:
         """启动 FFmpeg 推流并等待结束，按退出情况记录日志。"""
         ffmpeg = self._ffmpeg_executable()
@@ -312,8 +326,20 @@ class PlaybackMixin:
             duration = await probe_audio_duration(ffmpeg, audio_path)
         timeout = playback_timeout(duration, DEFAULT_PLAYBACK_TIMEOUT)
 
-        duration_text = f"{duration:.1f} 秒" if duration else "未知时长"
-        logger.info(f"[KOOK TTS欢迎] 开始播报「{display_name}」（约 {duration_text}）")
+        # 明确区分：音频文件时长（含尾部静音）≠ 进房后等待时间 ≠ 推流墙钟时间
+        if duration and speech_duration and tail_seconds > 0:
+            duration_text = (
+                f"语音 {speech_duration:.1f} 秒 + 尾部静音 {tail_seconds:.1f} 秒"
+                f"，共 {duration:.1f} 秒"
+            )
+        elif duration:
+            duration_text = f"{duration:.1f} 秒"
+        else:
+            duration_text = "未知时长"
+        logger.info(
+            f"[KOOK TTS欢迎] 开始播报「{display_name}」"
+            f"（音频时长：{duration_text}）"
+        )
         self._trace(f"开始推流：{' '.join(args)}")
 
         started = time.monotonic()
@@ -339,7 +365,9 @@ class PlaybackMixin:
             logger.error(f"[KOOK TTS欢迎] FFmpeg 推流失败（退出码 {code}）：{detail}")
             self._trace(f"推流失败：exit={code} {detail}")
         else:
-            logger.info(f"[KOOK TTS欢迎] 播报完成（用时 {elapsed:.1f} 秒）")
+            logger.info(
+                f"[KOOK TTS欢迎] 播报完成（FFmpeg 推流墙钟用时 {elapsed:.1f} 秒）"
+            )
             self._trace(f"推流完成：用时 {elapsed:.2f}s")
 
     # ------------------------------------------------------------------ #

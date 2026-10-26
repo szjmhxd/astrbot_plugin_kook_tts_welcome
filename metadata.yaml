@@ -2,7 +2,7 @@ name: astrbot_plugin_kook_tts_welcome # 插件唯一识别名
 display_name: KOOK TTS 语音欢迎
 desc: 成员进入 KOOK 语音频道时，机器人自动加入频道，按用户昵称实时合成（TTS）欢迎语音并播放，播放完成后离开。支持文案模板、指定用户定制、进出多状态播报。
 short_desc: 按用户昵称 TTS 合成的 KOOK 语音欢迎
-version: v0.1.0
+version: v0.1.2
 author: szjm
 support_platforms:
   - kook

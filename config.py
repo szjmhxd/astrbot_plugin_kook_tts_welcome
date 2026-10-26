@@ -13,7 +13,7 @@ from astrbot.api.star import StarTools
 
 from .constants import (
     DEFAULT_LEAVE_DELAY,
-    DEFAULT_START_DELAY,
+    DEFAULT_START_DELAY_MS,
     LOG_MAX_BYTES,
     PLUGIN_NAME,
     PLUGIN_VERSION,
@@ -81,8 +81,9 @@ class ConfigMixin:
         return self._conf_int("volume", 100, 0, 100)
 
     @property
-    def _start_delay(self) -> float:
-        return self._conf_float("start_delay", DEFAULT_START_DELAY, 0.0, 10.0)
+    def _start_delay_ms(self) -> int:
+        """入房到开播的最短间隔（毫秒）。"""
+        return self._conf_int("start_delay_ms", DEFAULT_START_DELAY_MS, 0, 10000)
 
     @property
     def _leave_delay(self) -> int:
@@ -132,7 +133,7 @@ class ConfigMixin:
             f"已加载 {PLUGIN_VERSION}：启用={self._enabled}，监听频道={channel}，"
             f"退出播报={'开' if self._play_exit else '关'}，"
             f"音量={self._volume}，冷却={self._cooldown}s，"
-            f"启动延迟={self._start_delay}s，尾部静音={self._leave_delay}s"
+            f"启动延迟={self._start_delay_ms}ms，尾部静音={self._leave_delay}s"
         )
         logger.info(f"[KOOK TTS欢迎] {summary}")
         self._trace(f"插件加载：{summary}")

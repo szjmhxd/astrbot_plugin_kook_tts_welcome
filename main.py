@@ -251,7 +251,7 @@ class KookTtsWelcomePlugin(
             + ("" if self._play_exit else "［退出播报已关闭］"),
             f"定制用户：{len(self._user_templates)} 人",
             f"音量：{self._volume} / 冷却：{self._cooldown} 秒",
-            f"启动延迟：{self._start_delay} 秒 / 尾部静音：{self._leave_delay} 秒",
+            f"入房间隔：{self._start_delay_ms} 毫秒 / 尾部静音：{self._leave_delay} 秒",
             f"FFmpeg：{'可用' if ffmpeg_ok else '不可用'}"
             + ("" if ffmpeg_ok else f"（{ffmpeg_detail}）"),
             f"Bot Token：{token_ready} / KOOK 适配器：{adapters} 个",
