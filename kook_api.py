@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -192,6 +193,91 @@ class KookApi:
         if guild_id:
             params["guild_id"] = guild_id
         return await self.request("GET", "/user/view", token, params=params)
+
+    # ------------------------------------------------------------------ #
+    # 服务器
+    # ------------------------------------------------------------------ #
+
+    async def get_guild(self, token: str, guild_id: str) -> dict[str, Any]:
+        """查询服务器详情，返回含 ``name`` / ``default_channel_id`` /
+        ``channels`` 的 Guild 对象。"""
+        return await self.request(
+            "GET", "/guild/view", token, params={"guild_id": guild_id}
+        )
+
+    async def get_channels(self, token: str, guild_id: str) -> list[dict[str, Any]]:
+        """查询服务器频道列表（``/guild/view`` 没给 channels 时的兜底）。"""
+        data = await self.request(
+            "GET", "/channel/list", token, params={"guild_id": guild_id}
+        )
+        items = data.get("items")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        return []
+
+    async def guild_mute_list(
+        self, token: str, guild_id: str
+    ) -> dict[str, list[str]]:
+        """查询服务器的静音 / 闭麦名单。
+
+        返回 ``{"mic": [...], "headset": [...]}``：
+
+        - ``mic``：被服务器**闭麦**（麦克风关闭）的用户
+        - ``headset``：被服务器**静音**（听不到声音）的用户
+
+        这是服务器级别的强制静音，用户在客户端自己点的静音官方不对外暴露。
+        """
+        data = await self.request(
+            "GET",
+            "/guild-mute/list",
+            token,
+            params={"guild_id": guild_id, "return_type": "detail"},
+        )
+        result: dict[str, list[str]] = {"mic": [], "headset": []}
+        for key in ("mic", "headset"):
+            block = data.get(key)
+            if not isinstance(block, dict):
+                continue
+            user_ids = block.get("user_ids")
+            if isinstance(user_ids, list):
+                result[key] = [to_text(item) for item in user_ids if to_text(item)]
+        return result
+
+    # ------------------------------------------------------------------ #
+    # 文件下载（第三方域名，不带鉴权头）
+    # ------------------------------------------------------------------ #
+
+    async def download_file(self, url: str, dest: Path) -> Path:
+        """下载第三方资源到本地路径。
+
+        必须使用**不带鉴权头**的独立会话：Bot Token 只能发给 kookapp.cn，
+        不能顺手带到一个任意 URL 上。
+        """
+        if not url.lower().startswith(("http://", "https://")):
+            raise KookApiError(-1, f"不是合法的下载地址：{url}", "/download")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        timeout = aiohttp.ClientTimeout(total=120)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        raise KookApiError(
+                            response.status,
+                            f"HTTP {response.status}: 下载失败 {url}",
+                            "/download",
+                        )
+                    payload = await response.read()
+        except aiohttp.ClientError as exc:
+            raise KookApiError(-1, f"网络请求失败：{exc!s}", "/download") from exc
+        except asyncio.TimeoutError as exc:
+            raise KookApiError(-1, "下载超时", "/download") from exc
+
+        if not payload:
+            raise KookApiError(-1, f"下载内容为空：{url}", "/download")
+        temp = dest.with_name(dest.name + ".part")
+        temp.write_bytes(payload)
+        temp.replace(dest)
+        return dest
 
     async def close(self) -> None:
         """关闭 HTTP 会话，插件卸载时调用。"""

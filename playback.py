@@ -210,14 +210,18 @@ class PlaybackMixin:
 
         await self._ensure_bot_id(token)
 
-        # 无文案直接跳过，避免白白占用语音频道
+        # 无内容直接跳过，避免白白占用语音频道
         if not request.override_text:
             single_user = event.user_id if len(request.events) == 1 else ""
-            if not (
-                (single_user and self._custom_template(single_user, event.state))
-                or self._state_template(event.state)
-            ):
-                self._trace(f"跳过：状态 {event.state} 未配置播报文案")
+            has_custom = bool(
+                single_user
+                and (
+                    self._custom_template(single_user, event.state)
+                    or self._custom_audio(single_user, event.state)
+                )
+            )
+            if not (has_custom or self._state_template(event.state)):
+                self._trace(f"跳过：状态 {event.state} 没有文案也没有定制音频")
                 return
 
         self._stream_aborted = False
@@ -334,19 +338,29 @@ class PlaybackMixin:
         event = events[0]
         t0 = time.monotonic()
 
+        # 指定用户定制音频：优先于 TTS，直接播放准备好的音频文件
+        custom_audio = self._custom_audio(event.user_id, event.state) if len(events) == 1 else ""
+
         speak_text = request.override_text
         if not speak_text:
             names = await self._resolve_many_names(token, events)
             channel_name = await self._resolve_channel_name(token, event.channel_id)
+            guild_name = await self._resolve_guild_name(token, event.guild_id)
             single_user = event.user_id if len(events) == 1 else ""
             speak_text = self._build_speak_text(
-                event.state, single_user, names, channel_name
+                event.state, single_user, names, channel_name, guild_name
             )
-        if not speak_text:
+        if not speak_text and not custom_audio:
             raise TtsError("未配置播报文案")
         t1 = time.monotonic()
 
-        audio_path = await self.synthesize(speak_text)
+        if custom_audio:
+            audio_path = await self._fetch_audio_source(custom_audio)
+            if not speak_text:
+                speak_text = f"定制音频（{Path(custom_audio).name or custom_audio}）"
+            self._trace(f"使用定制音频：{custom_audio} -> {audio_path}")
+        else:
+            audio_path = await self.synthesize(speak_text)
         t2 = time.monotonic()
 
         # 先把「播放结束后停留」的静音拼进音频，整段播放只保留一条 RTP 流

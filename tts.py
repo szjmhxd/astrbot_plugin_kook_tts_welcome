@@ -23,6 +23,7 @@ from typing import Any
 from astrbot.api import logger
 
 from .constants import (
+    CUSTOM_AUDIO_DIR_NAME,
     DEFAULT_EDGE_VOICE,
     DEFAULT_ENTER_TEMPLATE,
     DEFAULT_EXIT_TEMPLATE,
@@ -30,6 +31,7 @@ from .constants import (
     NICKNAME_CACHE_TTL,
     STATE_ENTER,
     STATE_EXIT,
+    STATE_LABELS,
     TTS_CACHE_DIR_NAME,
     TTS_TEXT_MAX_CHARS,
     USER_TEMPLATES_FILE_NAME,
@@ -158,14 +160,22 @@ class TtsMixin:
         user_id: str,
         names: dict[str, str],
         channel_name: str = "",
+        guild_name: str = "",
+        state: str = "",
     ) -> str:
-        """把模板渲染成最终播报文本。"""
+        """把模板渲染成最终播报文本。
+
+        占位符：``{nickname}`` ``{username}`` ``{user_id}`` ``{channel}``
+        ``{guild}`` ``{mute_type}``。
+        """
         nickname = names.get("nickname") or names.get("username") or user_id
         username = names.get("username") or nickname
         text = template.replace("{nickname}", nickname)
         text = text.replace("{username}", username)
         text = text.replace("{user_id}", user_id)
         text = text.replace("{channel}", channel_name or "语音频道")
+        text = text.replace("{guild}", guild_name)
+        text = text.replace("{mute_type}", STATE_LABELS.get(state, ""))
         text = " ".join(text.split())
         return text[:TTS_TEXT_MAX_CHARS].strip()
 
@@ -192,6 +202,7 @@ class TtsMixin:
         user_id: str,
         names: dict[str, str],
         channel_name: str = "",
+        guild_name: str = "",
     ) -> str:
         """合成播报文本：单人时用户定制文案优先，其次状态模板。
 
@@ -204,7 +215,46 @@ class TtsMixin:
             template = self._state_template(state)
         if not template:
             return ""
-        return self._render_text(template, user_id, names, channel_name)
+        return self._render_text(
+            template, user_id, names, channel_name, guild_name, state
+        )
+
+    # ------------------------------------------------------------------ #
+    # 指定用户定制音频
+    # ------------------------------------------------------------------ #
+
+    def _custom_audio(self, user_id: str, state: str) -> str:
+        """取指定用户在某个状态下使用的**音频**（本地路径或 http 链接）。
+
+        存储结构与定制文案共用 ``user_templates.json``，键名为
+        ``enter_audio`` / ``exit_audio`` 等。返回空串表示不做音频替换。
+        """
+        entry = self._user_templates.get(user_id)
+        if not isinstance(entry, dict):
+            return ""
+        return to_text(entry.get(f"{state}_audio"))
+
+    async def _fetch_audio_source(self, source: str) -> Path:
+        """把定制音频（本地路径 / URL）取到本地可用路径。
+
+        URL 会下载一次并缓存到 ``custom_audio/``，之后不再重复下载。
+        """
+        source = source.strip()
+        if source.lower().startswith(("http://", "https://")):
+            digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+            suffix = Path(source.split("?", 1)[0]).suffix
+            if suffix.lower() not in (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"):
+                suffix = ".mp3"
+            target = self._data_dir / CUSTOM_AUDIO_DIR_NAME / f"{digest}{suffix}"
+            if target.is_file() and target.stat().st_size > 0:
+                return target
+            self._trace(f"下载定制音频：{source}")
+            return await self._api.download_file(source, target)
+
+        path = Path(source).expanduser()
+        if not path.is_file():
+            raise TtsError(f"定制音频文件不存在：{source}")
+        return path
 
     # ------------------------------------------------------------------ #
     # TTS 合成

@@ -46,6 +46,7 @@ from .config import ConfigMixin
 from .constants import (
     DEFAULT_ENTER_TEMPLATE,
     DEFAULT_EXIT_TEMPLATE,
+    MUTE_POLL_MIN_SECONDS,
     PLUGIN_NAME,
     PLUGIN_VERSION,
     POLICY_IGNORE,
@@ -53,13 +54,22 @@ from .constants import (
     POLICY_MERGE,
     STATE_ENTER,
     STATE_EXIT,
+    STATE_LABELS,
+    STATE_MIC_OFF,
+    STATE_MIC_ON,
+    STATE_MUTE,
+    STATE_UNMUTE,
+    STATES_SUPPORTED,
     STATES_WITH_EVENTS,
 )
 from .hooking import HookingMixin, VoiceStateEvent, _Hook, extract_voice_state_event
 from .kook_api import KookApi
+from .mute import MuteWatchMixin
+from .notify import NotifyMixin
 from .playback import PlaybackMixin, _PlayRequest
 from .resources import ResourcesMixin
 from .tts import TtsMixin
+from .utils import to_text
 
 
 @register(
@@ -70,6 +80,8 @@ from .tts import TtsMixin
 )
 class KookTtsWelcomePlugin(
     TtsMixin,
+    NotifyMixin,
+    MuteWatchMixin,
     ResourcesMixin,
     PlaybackMixin,
     HookingMixin,
@@ -91,6 +103,7 @@ class KookTtsWelcomePlugin(
         self._worker: asyncio.Task | None = None
         self._attach_task: asyncio.Task | None = None
         self._ffmpeg_task: asyncio.Task | None = None
+        self._mute_task: asyncio.Task | None = None
 
         self._hooks: dict[str, _Hook] = {}
         self._bot_id = ""
@@ -107,6 +120,17 @@ class KookTtsWelcomePlugin(
         )
         self._channel_cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._user_templates: dict[str, Any] = self._load_user_templates()
+
+        # 文字播报：每服务器绑定表与解析缓存
+        self._notify_channels: dict[str, str] = self._load_notify_channels()
+        self._guild_info_cache: dict[str, tuple[float, dict]] = {}
+        self._text_channel_cache: dict[str, tuple[float, str, str]] = {}
+
+        # 静音 / 闭麦轮询：名单快照、活动服务器、成员所在频道
+        self._mute_state: dict[str, dict[str, set[str]]] = {}
+        self._guild_activity: dict[str, float] = {}
+        self._user_channels: dict[tuple[str, str], tuple[float, str]] = {}
+        self._guild_last_channel: dict[str, tuple[float, str]] = {}
 
         # 合并播报缓冲与调度
         self._merge_buffer: list[VoiceStateEvent] = []
@@ -131,18 +155,28 @@ class KookTtsWelcomePlugin(
         self._ffmpeg_task = asyncio.create_task(
             self._log_ffmpeg_state(), name=f"{PLUGIN_NAME}-ffmpeg"
         )
+        self._mute_task = asyncio.create_task(
+            self._mute_loop(), name=f"{PLUGIN_NAME}-mute"
+        )
 
     async def terminate(self) -> None:
         """还原回调、停止任务并释放语音连接。"""
         for platform_id in list(self._hooks):
             self._detach(platform_id)
 
-        for task in (self._attach_task, self._worker, self._ffmpeg_task, self._merge_task):
+        for task in (
+            self._attach_task,
+            self._worker,
+            self._ffmpeg_task,
+            self._mute_task,
+            self._merge_task,
+        ):
             if task and not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         self._merge_task = None
+        self._mute_task = None
         self._merge_buffer.clear()
 
         token = self._resolve_token()
@@ -173,6 +207,19 @@ class KookTtsWelcomePlugin(
         event = extract_voice_state_event(data)
         if event is None:
             return
+        self._handle_state_event(event, source="gateway")
+
+    def _handle_state_event(
+        self, event: VoiceStateEvent, source: str = "gateway"
+    ) -> None:
+        """统一的状态事件入口：网关事件与静音轮询共用。
+
+        ``source`` 只影响日志措辞与「该状态有没有网关事件来源」的校验。
+        """
+        if event.guild_id:
+            self._note_guild_activity(event.guild_id)
+        if event.state in (STATE_ENTER, STATE_EXIT):
+            self._track_user_voice(event)
 
         bot_id = self._resolve_bot_id()
         is_self = bool(bot_id) and event.user_id == bot_id
@@ -189,12 +236,15 @@ class KookTtsWelcomePlugin(
 
         if not self._enabled:
             return
-        if event.state not in STATES_WITH_EVENTS:
-            self._trace(f"忽略：状态 {event.state} 暂无网关事件来源")
+        if event.state not in STATES_SUPPORTED:
+            self._trace(f"忽略：未知状态 {event.state}")
+            return
+        if source == "gateway" and event.state not in STATES_WITH_EVENTS:
+            # 静音 / 闭麦没有网关事件，只可能来自轮询
             return
 
         self._trace(
-            f"收到语音事件：state={event.state} user={event.user_id} "
+            f"收到语音事件（{source}）：state={event.state} user={event.user_id} "
             f"channel={event.channel_id} guild={event.guild_id}"
         )
 
@@ -262,45 +312,6 @@ class KookTtsWelcomePlugin(
             name=f"{PLUGIN_NAME}-prefetch",
         )
 
-    def _dispatch_text_notify(self, event: VoiceStateEvent) -> None:
-        """把语音动作同步到文字频道（每条事件立即发，不参与合并）。"""
-        if not self._notify_text_channel_id:
-            return
-        template = (
-            self._notify_enter_text
-            if event.state == STATE_ENTER
-            else self._notify_exit_text
-        )
-        if not template:
-            return
-        asyncio.create_task(
-            self._send_text_notify(event, template),
-            name=f"{PLUGIN_NAME}-notify",
-        )
-
-    async def _send_text_notify(self, event: VoiceStateEvent, template: str) -> None:
-        """渲染并发送一条文字频道通知。"""
-        token = self._resolve_token()
-        if not token:
-            return
-        try:
-            names = await self._resolve_display_name(
-                token, event.user_id, event.guild_id
-            )
-            channel_name = await self._resolve_channel_name(token, event.channel_id)
-            text = self._render_text(
-                template, event.user_id, names, channel_name
-            )
-            if not text:
-                return
-            await self._api.send_message(
-                token, self._notify_text_channel_id, text
-            )
-            self._trace(f"文字通知已发送：{text}")
-        except Exception as exc:
-            logger.warning(f"[KOOK TTS欢迎] 文字频道通知失败：{exc}")
-            self._trace(f"文字通知失败：{exc!r}")
-
     @filter.on_platform_loaded()
     async def _on_platform_loaded(self) -> None:
         """平台适配器加载完成后立即尝试挂接。"""
@@ -330,7 +341,24 @@ class KookTtsWelcomePlugin(
             POLICY_INTERRUPT: "后进的打断",
             POLICY_MERGE: f"合并（窗口 {self._merge_window_ms}ms）",
         }.get(self._multi_user_policy, self._multi_user_policy)
-        notify = self._notify_text_channel_id or "（未开启）"
+
+        # 本服务器的文字播报频道（按三级兜底实时解析）
+        ctx = await self._channel_context(event)
+        guild_id = ctx["guild_id"]
+        token = self._resolve_token()
+        notify_channel, notify_source = ("", "")
+        if token and guild_id:
+            notify_channel, notify_source = await self._resolve_text_channel(
+                token, guild_id
+            )
+        notify = (
+            f"{notify_channel}（{notify_source}）"
+            if notify_channel
+            else "不会发送（本服务器没有可用文字频道）"
+        )
+        bound = self._notify_channels.get(guild_id, "") if guild_id else ""
+        mute = self._mute_poll_interval
+        mute_label = f"每 {mute} 秒轮询服务器静音名单" if mute else "关闭"
 
         lines = [
             "🎧 KOOK TTS 语音欢迎",
@@ -340,7 +368,9 @@ class KookTtsWelcomePlugin(
             f"退出文案：{self._state_template(STATE_EXIT) or '（未配置）'}"
             + ("" if self._play_exit else "［退出播报已关闭］"),
             f"多人策略：{policy_label}",
-            f"文字播报频道：{notify}",
+            f"服务器：{guild_id or '未知'}（本服务器手动绑定：{bound or '无'}）",
+            f"文字播报：{notify}",
+            f"静音/闭麦播报：{mute_label}",
             f"定制用户：{len(self._user_templates)} 人",
             f"音量：{self._volume} / 冷却：{self._cooldown} 秒",
             f"入房间隔：{self._start_delay_ms} 毫秒 / 尾部静音：{self._leave_delay} 秒",
@@ -366,12 +396,16 @@ class KookTtsWelcomePlugin(
             "管理员指令",
             "· /语音欢迎模板 enter|exit <文案> —— 设置状态播报模板",
             "· /语音欢迎定制 <用户ID> enter|exit <文案> —— 指定用户定制文案",
-            "· /语音欢迎定制删除 <用户ID> —— 删除该用户的定制文案",
-            "· /语音欢迎文字频道 当前|<频道ID>|关闭 —— 进出动作同步到文字频道",
+            "· /语音欢迎定制音频 <用户ID> enter|exit <路径或链接> —— 指定用户播放定制音频",
+            "· /语音欢迎定制删除 <用户ID> —— 删除该用户的定制文案与音频",
+            "· /语音欢迎文字频道 当前|<频道ID>|自动|关闭 —— 设置【本服务器】文字播报频道",
+            "· /语音欢迎文字频道 列表 —— 查看各服务器的文字频道绑定",
+            "· /语音欢迎静音播报 开 [秒]|关 —— 静音 / 闭麦状态播报（轮询）",
             "· /语音欢迎试听 [文案] —— 合成一段语音并在频道里试听",
             "· /语音欢迎重载 —— 重新读取配置与定制文案",
             "",
-            "模板占位符：{nickname} 服务器昵称 / {username} 用户名 / {user_id} / {channel} 频道名",
+            "模板占位符：{nickname} 服务器昵称 / {username} 用户名 / {user_id} / "
+            "{channel} 频道名 / {guild} 服务器名 / {mute_type} 静音类型",
             f"默认进入模板：{DEFAULT_ENTER_TEMPLATE}",
             f"默认退出模板：{DEFAULT_EXIT_TEMPLATE}",
             "",
@@ -380,8 +414,12 @@ class KookTtsWelcomePlugin(
             "· interrupt —— 后进的打断正在播的",
             "· ignore —— 只播第一个，后进的忽略",
             "",
-            "注意：KOOK 网关只推送「进入 / 退出」语音频道事件，",
-            "静音 / 闭麦状态官方无事件可监听（详见 README）。",
+            "文字播报频道怎么定：每服务器手动绑定 > 兜底配置 > 自动识别",
+            "服务器默认文字频道；三级都没有就不发文字，不会发错地方。",
+            "",
+            "静音 / 闭麦：KOOK 网关没有这两类事件，插件轮询 /guild-mute/list",
+            "的服务器静音名单来识别。只能识别「被服务器静音 / 闭麦」，",
+            "用户在客户端自己点的静音官方不暴露。默认关闭，需 /语音欢迎静音播报 开。",
         ]
         yield event.plain_result("\n".join(lines))
 
@@ -393,20 +431,85 @@ class KookTtsWelcomePlugin(
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_notify_channel(self, event: AstrMessageEvent):
-        """设置文字播报频道：/语音欢迎文字频道 当前|<频道ID>|关闭"""
+        """设置**本服务器**的文字播报频道（多服务器各管各的）"""
         parts = self._strip_command(event.message_str, "语音欢迎文字频道")
         arg = parts[0].strip() if parts else "当前"
 
-        if arg in ("关闭", "关", "off", "disable", "none"):
-            self.config["notify_text_channel_id"] = ""
-            saved = self._save_config("关闭文字播报")
+        if arg in ("列表", "list"):
             yield event.plain_result(
-                f"{'已关闭' if saved else '保存失败'}文字频道同步播报"
+                "文字播报频道绑定：\n" + "\n".join(self._notify_map_lines())
             )
             return
 
+        token = self._resolve_token()
+        ctx = await self._channel_context(event)
+        guild_id = ctx["guild_id"]
+
+        # ---- 全局兜底频道（所有服务器共用，默认留空） ---------------- #
+        if arg in ("全局", "global"):
+            sub = parts[1].strip() if len(parts) > 1 else ""
+            if not sub:
+                yield event.plain_result(
+                    f"当前兜底文字频道：{self._notify_text_channel_id or '未设置'}"
+                    "（为空时按服务器自动识别）\n"
+                    "用法：/语音欢迎文字频道 全局 <频道ID>｜全局 关闭"
+                )
+                return
+            if sub in ("关闭", "关", "off", "none"):
+                self.config["notify_text_channel_id"] = ""
+                self._clear_text_channel_cache()
+                saved = self._save_config("关闭兜底文字频道")
+                yield event.plain_result(
+                    f"{'已关闭' if saved else '保存失败'}兜底文字频道（改回自动识别）"
+                )
+                return
+            if not sub.isdigit():
+                yield event.plain_result("频道 ID 必须是纯数字")
+                return
+            self.config["notify_text_channel_id"] = sub
+            self._clear_text_channel_cache()
+            saved = self._save_config("设置兜底文字频道")
+            ok, detail = (False, "Bot Token 未就绪")
+            if token:
+                ok, detail = await self._send_test_notice(token, sub)
+            yield event.plain_result(
+                f"{'已设置' if saved else '保存失败'}兜底文字频道：{sub}"
+                "（所有服务器共用，优先级高于自动识别）\n"
+                + ("测试消息已发送 ✅" if ok else f"⚠️ 测试消息发送失败：{detail}")
+            )
+            return
+
+        if not guild_id:
+            yield event.plain_result(
+                "无法识别当前服务器 ID，请到目标服务器的文字频道里再试，"
+                "或直接用频道 ID 绑定：/语音欢迎文字频道 <频道ID>"
+            )
+            return
+
+        # ---- 关闭本服务器 ------------------------------------------- #
+        if arg in ("关闭", "关", "off", "disable", "none"):
+            saved = self._bind_notify_channel(guild_id, "off")
+            yield event.plain_result(
+                f"{'已关闭' if saved else '保存失败'}本服务器（{guild_id}）的文字播报"
+            )
+            return
+
+        # ---- 恢复自动识别 ------------------------------------------- #
+        if arg in ("自动", "auto", "默认", "default"):
+            saved = self._bind_notify_channel(guild_id, "")
+            channel_id, source = ("", "")
+            if token:
+                channel_id, source = await self._resolve_text_channel(token, guild_id)
+            yield event.plain_result(
+                f"{'已切换为自动识别' if saved else '保存失败'}\n"
+                f"本服务器（{guild_id}）当前解析结果："
+                + (f"{channel_id}（{source}）" if channel_id else "没有可用文字频道")
+            )
+            return
+
+        # ---- 绑定到当前 / 指定频道 ---------------------------------- #
         if arg in ("当前", "here", "this"):
-            channel_id = self._current_text_channel_id(event)
+            channel_id = ctx["channel_id"]
             if not channel_id:
                 yield event.plain_result(
                     "无法识别当前文字频道 ID，请直接指定：/语音欢迎文字频道 <频道ID>"
@@ -416,37 +519,45 @@ class KookTtsWelcomePlugin(
             channel_id = arg
         else:
             yield event.plain_result(
-                "用法：/语音欢迎文字频道 当前｜<频道ID>｜关闭\n"
-                "「当前」= 绑定你发这条指令所在的文字频道"
+                "用法：/语音欢迎文字频道 当前｜<频道ID>｜自动｜关闭｜列表\n"
+                "· 当前 = 绑定你发这条指令所在的文字频道（只对本服务器生效）\n"
+                "· 自动 = 删除绑定，改为自动识别服务器默认文字频道\n"
+                "· 关闭 = 本服务器不同步文字\n"
+                "· 全局 <频道ID> = 设置所有服务器共用的兜底频道"
             )
             return
 
-        self.config["notify_text_channel_id"] = channel_id
-        saved = self._save_config("设置文字播报频道")
+        saved = self._bind_notify_channel(guild_id, channel_id)
         if not saved:
-            yield event.plain_result("保存配置失败，请查看日志")
+            yield event.plain_result("保存绑定失败，请查看日志")
             return
 
-        # 立刻发一条测试消息，验证机器人在该频道的发言权限
-        test_text = "✅ 文字频道同步播报已开启，成员进出语音频道会在这里通知"
-        sent = False
-        token = self._resolve_token()
+        ok, detail = (False, "Bot Token 未就绪")
         if token:
-            try:
-                await self._api.send_message(token, channel_id, test_text)
-                sent = True
-            except Exception as exc:
-                logger.warning(f"[KOOK TTS欢迎] 文字播报测试消息发送失败：{exc}")
-                self._trace(f"文字播报测试消息失败：{exc!r}")
-
+            ok, detail = await self._send_test_notice(token, channel_id)
         yield event.plain_result(
-            f"已设置文字播报频道：{channel_id}\n"
-            + (
-                "测试消息已发送 ✅"
-                if sent
-                else "⚠️ 测试消息发送失败：请确认机器人在该频道有发言权限"
-            )
+            f"已绑定：服务器 {guild_id} → 文字频道 {channel_id}"
+            f"（{ctx['name'] or '名称未知'}）\n"
+            + ("测试消息已发送 ✅" if ok else f"⚠️ 测试消息发送失败：{detail}")
         )
+
+    async def _channel_context(self, event: AstrMessageEvent) -> dict[str, str]:
+        """取指令所在频道的信息：``channel_id`` / ``guild_id`` / ``name``。
+
+        KOOK 的消息事件只带频道 ID，服务器 ID 要再查一次 ``/channel/view``。
+        """
+        info = {"channel_id": self._current_text_channel_id(event), "guild_id": "", "name": ""}
+        token = self._resolve_token()
+        if not token or not info["channel_id"]:
+            return info
+        try:
+            channel = await self._api.get_channel(token, info["channel_id"])
+        except Exception as exc:
+            self._trace(f"查询当前频道信息失败：{exc!r}")
+            return info
+        info["guild_id"] = to_text(channel.get("guild_id"))
+        info["name"] = to_text(channel.get("name"))
+        return info
 
     @staticmethod
     def _current_text_channel_id(event: AstrMessageEvent) -> str:
@@ -475,15 +586,18 @@ class KookTtsWelcomePlugin(
         parts = self._strip_command(event.message_str, "语音欢迎模板", maxsplit=1)
         if len(parts) < 2:
             yield event.plain_result(
-                "用法：/语音欢迎模板 enter|exit <文案>\n"
-                "占位符：{nickname} {username} {user_id}"
+                "用法：/语音欢迎模板 <状态> <文案>\n"
+                "状态：" + " / ".join(sorted(STATES_SUPPORTED)) + "\n"
+                "占位符：{nickname} {username} {user_id} {channel} {guild} {mute_type}"
             )
             return
 
         state = parts[0].lower()
         text = parts[1].strip()
-        if state not in ("enter", "exit"):
-            yield event.plain_result("状态只支持 enter（进入）或 exit（退出）")
+        if state not in STATES_SUPPORTED:
+            yield event.plain_result(
+                "状态只支持：" + " / ".join(sorted(STATES_SUPPORTED))
+            )
             return
         if not text:
             yield event.plain_result("文案不能为空；填「清空」可关闭该状态播报")
@@ -493,7 +607,11 @@ class KookTtsWelcomePlugin(
             text = ""
         self.config[f"template_{state}"] = text
         saved = self._save_config(f"设置 {state} 模板")
-        label = "进入" if state == STATE_ENTER else "退出"
+        label = {
+            STATE_ENTER: "进入",
+            STATE_EXIT: "退出",
+            **STATE_LABELS,
+        }.get(state, state)
         shown = text or "（已关闭）"
         yield event.plain_result(
             f"{'已设置' if saved else '设置失败（配置写入出错）'}：{label}文案 = {shown}"
@@ -551,7 +669,147 @@ class KookTtsWelcomePlugin(
         del self._user_templates[user_id]
         saved = self._save_user_templates()
         yield event.plain_result(
-            f"{'已删除' if saved else '删除失败（写入出错）'}：用户 {user_id} 的定制文案"
+            f"{'已删除' if saved else '删除失败（写入出错）'}：用户 {user_id} 的定制文案与音频"
+        )
+
+    @filter.command("语音欢迎定制音频")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    async def cmd_user_audio(self, event: AstrMessageEvent):
+        """指定用户的定制音频：/语音欢迎定制音频 <用户ID> enter|exit <路径或链接>"""
+        parts = self._strip_command(event.message_str, "语音欢迎定制音频", maxsplit=2)
+        if len(parts) < 3:
+            yield event.plain_result(
+                "用法：/语音欢迎定制音频 <用户ID> enter|exit <音频路径或 http 链接>\n"
+                "例：/语音欢迎定制音频 123456 enter https://example.com/vip.mp3\n"
+                "该用户进出语音频道时直接播放这段音频，不再走 TTS。"
+            )
+            return
+
+        user_id, state, source = parts[0].strip(), parts[1].lower(), parts[2].strip()
+        if not user_id.isdigit():
+            yield event.plain_result("用户 ID 必须是纯数字（KOOK 用户 ID）")
+            return
+        if state not in STATES_SUPPORTED:
+            yield event.plain_result(
+                "状态只支持：" + " / ".join(sorted(STATES_SUPPORTED))
+            )
+            return
+        if not source:
+            yield event.plain_result("音频路径或链接不能为空")
+            return
+        if not source.lower().startswith(("http://", "https://")):
+            # 本地路径：立刻校验，避免存进配置后才发现写错
+            if not Path(source).expanduser().is_file():
+                yield event.plain_result(f"本地音频文件不存在：{source}")
+                return
+
+        entry = self._user_templates.get(user_id)
+        if not isinstance(entry, dict):
+            entry = {}
+            self._user_templates[user_id] = entry
+        entry[f"{state}_audio"] = source
+        saved = self._save_user_templates()
+        yield event.plain_result(
+            f"{'已设置' if saved else '保存失败'}：用户 {user_id} 的"
+            f"{STATE_LABELS.get(state, state)}定制音频 = {source}"
+        )
+
+    @filter.command("语音欢迎定制音频删除")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    async def cmd_user_audio_delete(self, event: AstrMessageEvent):
+        """删除指定用户的定制音频：/语音欢迎定制音频删除 <用户ID> [状态]"""
+        parts = self._strip_command(event.message_str, "语音欢迎定制音频删除")
+        if not parts or not parts[0].isdigit():
+            yield event.plain_result(
+                "用法：/语音欢迎定制音频删除 <用户ID> [enter|exit|全部]"
+            )
+            return
+
+        user_id = parts[0]
+        state = parts[1].lower() if len(parts) > 1 else "全部"
+        entry = self._user_templates.get(user_id)
+        if not isinstance(entry, dict):
+            yield event.plain_result(f"用户 {user_id} 没有定制内容")
+            return
+
+        states = list(STATES_SUPPORTED) if state == "全部" else [state]
+        removed = [s for s in states if entry.pop(f"{s}_audio", None) is not None]
+        if not removed:
+            yield event.plain_result(f"用户 {user_id} 没有这些状态的定制音频")
+            return
+        if not entry:
+            del self._user_templates[user_id]
+        saved = self._save_user_templates()
+        yield event.plain_result(
+            f"{'已删除' if saved else '删除失败（写入出错）'}："
+            f"用户 {user_id} 的定制音频（{'、'.join(removed)}）"
+        )
+
+    @filter.command("语音欢迎静音播报")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
+    async def cmd_mute_watch(self, event: AstrMessageEvent):
+        """静音 / 闭麦播报开关：/语音欢迎静音播报 开 [秒]|关|状态"""
+        parts = self._strip_command(event.message_str, "语音欢迎静音播报")
+        arg = parts[0].strip().lower() if parts else "状态"
+        current = self._mute_poll_interval
+
+        if arg in ("状态", "status"):
+            yield event.plain_result(self._mute_status_text(current))
+            return
+
+        if arg in ("关", "关闭", "off", "disable"):
+            self.config["mute_poll_interval"] = 0
+            saved = self._save_config("关闭静音播报")
+            yield event.plain_result(
+                f"{'已关闭' if saved else '保存失败'}静音 / 闭麦播报"
+            )
+            return
+
+        if arg in ("开", "on", "enable"):
+            interval = 5
+            if len(parts) > 1 and parts[1].strip().isdigit():
+                interval = max(MUTE_POLL_MIN_SECONDS, int(parts[1].strip()))
+            self.config["mute_poll_interval"] = interval
+            saved = self._save_config("开启静音播报")
+            missing = [
+                state
+                for state in (STATE_MUTE, STATE_UNMUTE, STATE_MIC_OFF, STATE_MIC_ON)
+                if not self._state_template(state)
+            ]
+            hint = (
+                "\n⚠️ 这些状态还没有文案，不会播报：" + "、".join(missing)
+                + "\n用 /语音欢迎模板 mic_off <文案> 这类指令补上。"
+                if missing
+                else ""
+            )
+            yield event.plain_result(
+                f"{'已开启' if saved else '保存失败'}：每 {interval} 秒轮询服务器静音名单\n"
+                "只能识别「被服务器静音 / 闭麦」，客户端自己点的不行。" + hint
+            )
+            return
+
+        yield event.plain_result(
+            "用法：/语音欢迎静音播报 开 [秒]｜关｜状态\n"
+            "开启后插件轮询 /guild-mute/list，识别服务器级静音与闭麦。"
+        )
+
+    def _mute_status_text(self, current: int) -> str:
+        """静音播报状态文本（指令输出用）。"""
+        label = f"每 {current} 秒轮询服务器静音名单" if current else "已关闭"
+        templates = "、".join(
+            f"{STATE_LABELS[state]}文案={'有' if self._state_template(state) else '无'}"
+            for state in (STATE_MUTE, STATE_UNMUTE, STATE_MIC_OFF, STATE_MIC_ON)
+        )
+        watched = len(self._guild_activity)
+        return (
+            f"静音 / 闭麦播报：{label}\n"
+            f"状态文案：{templates}\n"
+            f"正在跟踪的服务器：{watched} 个\n"
+            "说明：只能识别服务器级静音 / 闭麦（/guild-mute/list），"
+            "客户端自己点的静音官方不暴露。"
         )
 
     @filter.command("语音欢迎试听")
@@ -602,12 +860,18 @@ class KookTtsWelcomePlugin(
     async def cmd_reload(self, event: AstrMessageEvent):
         """重新读取配置、定制文案并检测 FFmpeg"""
         self._user_templates = self._load_user_templates()
+        self._notify_channels = self._load_notify_channels()
         self._ffmpeg_cache = None
         self._nickname_cache.clear()
+        self._channel_cache.clear()
+        self._guild_info_cache.clear()
+        self._text_channel_cache.clear()
+        self._mute_state.clear()
         ok, detail = await self._check_ffmpeg()
         self._attach_all()
         yield event.plain_result(
             f"已重载：定制用户 {len(self._user_templates)} 人；"
+            f"文字频道绑定 {len(self._notify_channels)} 个；"
             f"FFmpeg {'可用（' + detail + '）' if ok else '不可用（' + detail + '）'}"
         )
 

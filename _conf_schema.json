@@ -14,7 +14,7 @@
   "template_enter": {
     "type": "text",
     "description": "进入语音频道播报文案",
-    "hint": "支持占位符：{nickname} 服务器昵称、{username} 用户名、{user_id} 用户 ID、{channel} 语音频道名。多人合并播报时 {nickname} 会拼成「张三、李四」。留空表示关闭进入播报。",
+    "hint": "支持占位符：{nickname} 服务器昵称、{username} 用户名、{user_id} 用户 ID、{channel} 语音频道名、{guild} 服务器名。多人合并播报时 {nickname} 会拼成「张三、李四」。留空表示关闭进入播报。",
     "default": "欢迎 {nickname} 进入 {channel}"
   },
   "template_exit": {
@@ -48,21 +48,62 @@
   },
   "notify_text_channel_id": {
     "type": "string",
-    "description": "文字播报频道 ID",
-    "hint": "填写文字频道 ID 后，成员进出语音频道时会在该频道发一条文字通知（每条立即发，不受语音策略影响）。推荐直接在目标文字频道发送 /语音欢迎文字频道 当前 一键绑定。留空关闭。",
+    "description": "兜底文字频道 ID（可选）",
+    "hint": "所有服务器共用的文字频道。留空推荐：插件会自动识别每个服务器的默认文字频道。只有「某些服务器必须发到固定频道」时才填，或者用 /语音欢迎文字频道 当前 按服务器单独绑定。",
     "default": ""
+  },
+  "notify_auto_channel": {
+    "type": "bool",
+    "description": "自动识别服务器默认文字频道",
+    "hint": "打开后按「服务器默认频道 → 第一个文字频道」的顺序自动找频道；找不到就不发文字，不会乱发。多服务器场景建议打开。",
+    "default": true
   },
   "notify_enter_text": {
     "type": "text",
     "description": "文字播报 · 进入文案",
-    "hint": "占位符同语音模板。留空则不发进入通知。",
+    "hint": "占位符：{nickname} {username} {user_id} {channel} {guild}。留空则不发进入通知。",
     "default": "{nickname} 进入了语音频道 {channel}"
   },
   "notify_exit_text": {
     "type": "text",
     "description": "文字播报 · 退出文案",
-    "hint": "占位符同语音模板。留空则不发退出通知。",
+    "hint": "占位符同上。留空则不发退出通知。",
     "default": "{nickname} 退出了语音频道 {channel}"
+  },
+  "mute_poll_interval": {
+    "type": "int",
+    "description": "静音 / 闭麦轮询间隔（秒）",
+    "hint": "KOOK 没有静音 / 闭麦事件，插件只能轮询服务器的静音名单。0 = 关闭。开启后需要同时填下方的静音 / 闭麦播报文案才会出声。只在最近有语音活动的服务器上轮询。",
+    "default": 0,
+    "slider": {
+      "min": 0,
+      "max": 60,
+      "step": 1
+    }
+  },
+  "template_mute": {
+    "type": "text",
+    "description": "静音播报文案",
+    "hint": "被服务器静音时播报。占位符同上，另可用 {mute_type}。留空 = 不播报。需要先把「静音 / 闭麦轮询间隔」设为大于 0。",
+    "default": ""
+  },
+  "template_unmute": {
+    "type": "text",
+    "description": "解除静音播报文案",
+    "hint": "静音被解除时播报。留空 = 不播报。",
+    "default": ""
+  },
+  "template_mic_off": {
+    "type": "text",
+    "description": "闭麦播报文案",
+    "hint": "被服务器闭麦（麦克风关闭）时播报。留空 = 不播报。",
+    "default": ""
+  },
+  "template_mic_on": {
+    "type": "text",
+    "description": "开麦播报文案",
+    "hint": "闭麦被解除时播报。留空 = 不播报。",
+    "default": ""
   },
   "edge_voice": {
     "type": "string",

@@ -17,6 +17,7 @@ from .constants import (
     DEFAULT_LEAVE_DELAY,
     DEFAULT_MERGE_WINDOW_MS,
     DEFAULT_MULTI_USER_POLICY,
+    DEFAULT_MUTE_POLL_SECONDS,
     DEFAULT_NOTIFY_ENTER,
     DEFAULT_NOTIFY_EXIT,
     DEFAULT_START_DELAY_MS,
@@ -24,6 +25,7 @@ from .constants import (
     LEGACY_EXIT_TEMPLATE,
     LOG_MAX_BYTES,
     MULTI_USER_POLICIES,
+    MUTE_POLL_MIN_SECONDS,
     PLUGIN_NAME,
     PLUGIN_VERSION,
 )
@@ -107,8 +109,13 @@ class ConfigMixin:
 
     @property
     def _notify_text_channel_id(self) -> str:
-        """文字同步播报的目标文字频道 ID（空 = 关闭）。"""
+        """兜底文字频道 ID（空 = 交给自动识别）。"""
         return self._conf_str("notify_text_channel_id")
+
+    @property
+    def _notify_auto_channel(self) -> bool:
+        """是否自动识别服务器默认文字频道。"""
+        return self._conf_bool("notify_auto_channel", True)
 
     @property
     def _notify_enter_text(self) -> str:
@@ -117,6 +124,12 @@ class ConfigMixin:
     @property
     def _notify_exit_text(self) -> str:
         return self._conf_str("notify_exit_text", DEFAULT_NOTIFY_EXIT)
+
+    @property
+    def _mute_poll_interval(self) -> int:
+        """静音 / 闭麦轮询间隔（秒），0 = 关闭。"""
+        raw = self._conf_int("mute_poll_interval", DEFAULT_MUTE_POLL_SECONDS, 0, 300)
+        return 0 if raw <= 0 else max(MUTE_POLL_MIN_SECONDS, raw)
 
     @property
     def _leave_delay(self) -> int:
@@ -162,24 +175,29 @@ class ConfigMixin:
     def _log_startup(self) -> None:
         """在 AstrBot 日志与诊断日志里输出启动配置摘要。"""
         channel = self._target_channel or "自动跟随事件频道"
-        notify_id = self._notify_text_channel_id
-        notify_desc = notify_id if notify_id else "未开启（语音动作不会同步到文字频道）"
+        bound = len(getattr(self, "_notify_channels", {}) or {})
+        if bound:
+            notify_desc = f"每服务器绑定 {bound} 个"
+        elif self._notify_text_channel_id:
+            notify_desc = f"兜底频道 {self._notify_text_channel_id}"
+        elif self._notify_auto_channel:
+            notify_desc = "自动识别各服务器默认文字频道"
+        else:
+            notify_desc = "未开启（语音动作不会同步到文字频道）"
+
+        mute = self._mute_poll_interval
+        mute_desc = f"每 {mute}s 轮询服务器静音名单" if mute else "关闭"
         summary = (
             f"已加载 {PLUGIN_VERSION}：启用={self._enabled}，监听频道={channel}，"
             f"退出播报={'开' if self._play_exit else '关'}，"
             f"音量={self._volume}，冷却={self._cooldown}s，"
             f"启动延迟={self._start_delay_ms}ms，尾部静音={self._leave_delay}s，"
-            f"文字播报频道={notify_desc}"
+            f"文字播报={notify_desc}，静音闭麦播报={mute_desc}"
         )
         logger.info(f"[KOOK TTS欢迎] {summary}")
         self._trace(f"插件加载：{summary}")
         self._trace(f"数据目录：{self._data_dir}")
         self._trace(f"诊断日志：{self._log_file}")
-        if not notify_id:
-            logger.info(
-                "[KOOK TTS欢迎] 文字播报未开启：在你想同步的文字频道里发送 "
-                "/语音欢迎文字频道 当前 即可开启"
-            )
 
     def _migrate_config(self) -> None:
         """把历史版本写入配置的旧默认文案升级为带 {channel} 的新默认。

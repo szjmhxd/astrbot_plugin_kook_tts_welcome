@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.2.1"
+PLUGIN_VERSION = "v0.3.0"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -20,21 +20,34 @@ KOOK_API_BASE = "https://www.kookapp.cn/api/v3"
 # KOOK 网关系统消息的 type 固定为 255，具体事件名在 extra.type 字段里
 KOOK_SYSTEM_MESSAGE_TYPE = 255
 
-# 语音频道状态。KOOK 网关只推送进入 / 退出两类事件；
-# 静音、闭麦等状态变更官方没有对应事件（见 README「已知限制」）。
+# 语音频道状态
 STATE_ENTER = "enter"
 STATE_EXIT = "exit"
-STATE_MUTE = "mute"
+# 静音 / 闭麦：KOOK 网关没有事件，只能轮询 /guild-mute/list（服务器级静音）
+STATE_MUTE = "mute"  # 耳机静音（被服务器静音）
 STATE_UNMUTE = "unmute"
-STATE_MIC_OFF = "mic_off"
+STATE_MIC_OFF = "mic_off"  # 麦克风闭麦（被服务器闭麦）
 STATE_MIC_ON = "mic_on"
 
 KOOK_EVENT_TO_STATE = {
     "joined_channel": STATE_ENTER,
     "exited_channel": STATE_EXIT,
 }
-# 具备网关事件的状态（其余状态保留模板与分发骨架，等待 KOOK 开放对应事件）
+# 有网关事件直接推送的状态
 STATES_WITH_EVENTS = frozenset({STATE_ENTER, STATE_EXIT})
+# 需要轮询 /guild-mute/list 才能拿到的状态
+STATES_WITH_POLLING = frozenset(
+    {STATE_MUTE, STATE_UNMUTE, STATE_MIC_OFF, STATE_MIC_ON}
+)
+STATES_SUPPORTED = STATES_WITH_EVENTS | STATES_WITH_POLLING
+
+# 静音 / 闭麦状态的中文说明，用于 {mute_type} 占位符
+STATE_LABELS = {
+    STATE_MUTE: "静音",
+    STATE_UNMUTE: "解除静音",
+    STATE_MIC_OFF: "闭麦",
+    STATE_MIC_ON: "开麦",
+}
 
 # --------------------------------------------------------------------------- #
 # 语音推流时序
@@ -67,7 +80,7 @@ NICKNAME_CACHE_TTL = 3600
 NICKNAME_CACHE_MAX = 2048
 
 # 默认文案模板。占位符：{nickname} 服务器昵称、{username} 用户名、
-# {user_id} 用户 ID、{channel} 语音频道名称
+# {user_id} 用户 ID、{channel} 语音频道名、{guild} 服务器名
 DEFAULT_ENTER_TEMPLATE = "欢迎 {nickname} 进入 {channel}"
 DEFAULT_EXIT_TEMPLATE = "再见，{nickname}，离开 {channel}"
 
@@ -79,6 +92,22 @@ LEGACY_EXIT_TEMPLATE = "再见，{nickname}"
 # 文字频道同步播报的默认文案（留空模板 = 关闭对应通知）
 DEFAULT_NOTIFY_ENTER = "{nickname} 进入了语音频道 {channel}"
 DEFAULT_NOTIFY_EXIT = "{nickname} 退出了语音频道 {channel}"
+
+# 静音 / 闭麦播报默认关闭（留空 = 不播报）。开启后需要轮询接口，
+# 且每次状态变化都要进出语音频道，默认不打扰。
+DEFAULT_TEMPLATE_MUTE = ""
+DEFAULT_TEMPLATE_UNMUTE = ""
+DEFAULT_TEMPLATE_MIC_OFF = ""
+DEFAULT_TEMPLATE_MIC_ON = ""
+
+# 静音 / 闭麦轮询间隔（秒），0 = 关闭
+DEFAULT_MUTE_POLL_SECONDS = 0
+# 服务器没有语音活动后多久停止轮询（秒）
+MUTE_POLL_IDLE_SECONDS = 900
+# 轮询间隔下限，防止配置过小打爆接口
+MUTE_POLL_MIN_SECONDS = 3
+# 记录「用户当前所在语音频道」的有效期（秒），用于给静音事件定位频道
+USER_VOICE_CHANNEL_TTL = 3600
 
 # 多人同时进房时的语音策略
 POLICY_IGNORE = "ignore"  # 播报中 / 冷却中直接忽略后进的
@@ -96,3 +125,14 @@ DEFAULT_EDGE_VOICE = "zh-CN-XiaoxiaoNeural"
 # --------------------------------------------------------------------------- #
 
 USER_TEMPLATES_FILE_NAME = "user_templates.json"
+# 服务器 → 文字播报频道 的映射（指令 /语音欢迎文字频道 写入）
+NOTIFY_CHANNELS_FILE_NAME = "notify_channels.json"
+# 映射表里表示「本服务器不发送文字」的哨兵值
+NOTIFY_DISABLED = "off"
+# 用户定制音频的本地副本目录
+CUSTOM_AUDIO_DIR_NAME = "custom_audio"
+
+# 服务器信息（名称 / 默认频道 / 频道列表）缓存有效期
+GUILD_INFO_CACHE_TTL = 3600
+# 「识别不到文字频道」的负缓存有效期，稍短一些，方便用户新建频道后自动生效
+TEXT_CHANNEL_NEGATIVE_TTL = 300
