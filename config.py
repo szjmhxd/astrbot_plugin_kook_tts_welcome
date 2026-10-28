@@ -20,6 +20,10 @@ from .constants import (
     DEFAULT_MUTE_POLL_SECONDS,
     DEFAULT_NOTIFY_ENTER,
     DEFAULT_NOTIFY_EXIT,
+    DEFAULT_NOTIFY_MIC_OFF,
+    DEFAULT_NOTIFY_MIC_ON,
+    DEFAULT_NOTIFY_MUTE,
+    DEFAULT_NOTIFY_UNMUTE,
     DEFAULT_START_DELAY_MS,
     LEGACY_ENTER_TEMPLATE,
     LEGACY_EXIT_TEMPLATE,
@@ -126,6 +130,22 @@ class ConfigMixin:
     @property
     def _notify_exit_text(self) -> str:
         return self._conf_str("notify_exit_text", DEFAULT_NOTIFY_EXIT)
+
+    @property
+    def _notify_mute_text(self) -> str:
+        return self._conf_str("notify_mute_text", DEFAULT_NOTIFY_MUTE)
+
+    @property
+    def _notify_unmute_text(self) -> str:
+        return self._conf_str("notify_unmute_text", DEFAULT_NOTIFY_UNMUTE)
+
+    @property
+    def _notify_mic_off_text(self) -> str:
+        return self._conf_str("notify_mic_off_text", DEFAULT_NOTIFY_MIC_OFF)
+
+    @property
+    def _notify_mic_on_text(self) -> str:
+        return self._conf_str("notify_mic_on_text", DEFAULT_NOTIFY_MIC_ON)
 
     @property
     def _mute_notify_enabled(self) -> bool:

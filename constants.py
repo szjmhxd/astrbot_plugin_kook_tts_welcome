@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.4.2"
+PLUGIN_VERSION = "v0.4.3"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -105,6 +105,12 @@ LEGACY_EXIT_TEMPLATE = "再见，{nickname}"
 # 文字频道同步播报的默认文案（留空模板 = 关闭对应通知）
 DEFAULT_NOTIFY_ENTER = "{nickname} 进入了「{channel}」"
 DEFAULT_NOTIFY_EXIT = "{nickname} 退出了「{channel}」"
+# 静音 / 闭麦四态的文字播报默认文案。KOOK 只推送「被管理员服务器静音 /
+# 闭麦」，自静音 / 自闭麦官方不暴露，文案里直接写明是管理员操作。
+DEFAULT_NOTIFY_MUTE = "{nickname} 被管理员服务器静音"
+DEFAULT_NOTIFY_UNMUTE = "{nickname} 的服务器静音已解除"
+DEFAULT_NOTIFY_MIC_OFF = "{nickname} 被管理员服务器闭麦"
+DEFAULT_NOTIFY_MIC_ON = "{nickname} 的服务器闭麦已解除"
 LEGACY_NOTIFY_ENTER = "{nickname} 进入了语音频道 {channel}"
 LEGACY_NOTIFY_EXIT = "{nickname} 退出了语音频道 {channel}"
 

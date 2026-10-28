@@ -61,19 +61,43 @@
   "notify_enter_text": {
     "type": "text",
     "description": "文字播报 · 进入文案",
-    "hint": "占位符：{nickname} {username} {user_id} {channel} {guild}。留空则不发进入通知。发出的消息第一行是 UTC+8 时间戳，第二行是这里渲染的正文。",
+    "hint": "占位符：{nickname} {username} {user_id} {channel} {guild}。留空则不发进入通知。发出的消息第一行是 UTC+8 时间戳（yyyy-mm-dd hh:mm:ss.sss），第二行是正文。",
     "default": "{nickname} 进入了「{channel}」"
   },
   "notify_exit_text": {
     "type": "text",
     "description": "文字播报 · 退出文案",
-    "hint": "占位符同上。留空则不发退出通知。",
+    "hint": "占位符同上。留空则不发退出通知。同样带时间戳首行。",
     "default": "{nickname} 退出了「{channel}」"
+  },
+  "notify_mute_text": {
+    "type": "text",
+    "description": "文字播报 · 静音文案",
+    "hint": "被管理员服务器静音时发到文字频道。占位符同上。留空 = 不发。注意：只有管理员右键成员 →「服务器静音」才触发，自己点客户端的静音按钮 KOOK 不推送，永远不会触发。",
+    "default": "{nickname} 被管理员服务器静音"
+  },
+  "notify_unmute_text": {
+    "type": "text",
+    "description": "文字播报 · 解除静音文案",
+    "hint": "管理员解除服务器静音时发到文字频道。留空 = 不发。",
+    "default": "{nickname} 的服务器静音已解除"
+  },
+  "notify_mic_off_text": {
+    "type": "text",
+    "description": "文字播报 · 闭麦文案",
+    "hint": "被管理员服务器闭麦时发到文字频道。留空 = 不发。自己闭麦同样不触发。",
+    "default": "{nickname} 被管理员服务器闭麦"
+  },
+  "notify_mic_on_text": {
+    "type": "text",
+    "description": "文字播报 · 开麦文案",
+    "hint": "管理员解除服务器闭麦时发到文字频道。留空 = 不发。",
+    "default": "{nickname} 的服务器闭麦已解除"
   },
   "mute_notify_enabled": {
     "type": "bool",
     "description": "启用静音 / 闭麦播报",
-    "hint": "打开后实时监听服务器静音 / 闭麦并播报（网关事件，轮询兜底）。注意：只能识别「被服务器静音 / 闭麦」（管理员操作），自己在客户端点的静音官方不暴露，拿不到。",
+    "hint": "打开后监听「被管理员服务器静音 / 闭麦」并播报（网关事件实时推送，轮询兜底），语音和文字频道都会同步。⚠️ 只有管理员在成员列表右键 →「服务器静音 / 服务器闭麦」（等价 /guild-mute/create）才触发；自己在客户端点的麦克风 / 耳机按钮是自静音，KOOK 官方不推送，任何机器人都拿不到，永远不会触发。",
     "default": false
   },
   "mute_poll_interval": {
@@ -90,7 +114,7 @@
   "template_mute": {
     "type": "text",
     "description": "静音播报文案",
-    "hint": "被服务器静音时播报。占位符同上，另可用 {mute_type}。留空 = 不播报。需要先打开「启用静音 / 闭麦播报」。",
+    "hint": "被管理员服务器静音时的语音播报文案。占位符同上，另可用 {mute_type}。留空 = 不播报。需要先打开「启用静音 / 闭麦播报」。自静音不触发。",
     "default": ""
   },
   "template_unmute": {
@@ -102,7 +126,7 @@
   "template_mic_off": {
     "type": "text",
     "description": "闭麦播报文案",
-    "hint": "被服务器闭麦（麦克风关闭）时播报。留空 = 不播报。",
+    "hint": "被管理员服务器闭麦（麦克风关闭）时的语音播报文案。留空 = 不播报。自闭麦不触发。",
     "default": ""
   },
   "template_mic_on": {

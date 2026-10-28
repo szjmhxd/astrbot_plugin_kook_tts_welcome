@@ -30,6 +30,10 @@ from .constants import (
     PLUGIN_NAME,
     STATE_ENTER,
     STATE_EXIT,
+    STATE_MIC_OFF,
+    STATE_MIC_ON,
+    STATE_MUTE,
+    STATE_UNMUTE,
     TEXT_CHANNEL_NEGATIVE_TTL,
 )
 from .hooking import VoiceStateEvent
@@ -240,15 +244,18 @@ class NotifyMixin:
     def _dispatch_text_notify(self, event: VoiceStateEvent) -> None:
         """把一次语音动作同步到文字频道（每条事件立即发，不参与合并）。
 
-        只处理进入 / 退出：静音、闭麦是轮询出来的**估计状态**，写进文字频道
-        噪音大且容易误报，不做同步。
+        六个状态各有独立文字模板：进入 / 退出 / 静音 / 解除静音 / 闭麦 / 开麦。
+        静音类只有「被管理员服务器静音 / 闭麦」才会进来（KOOK 不推送自静音），
+        与语音播报共用同一开关，但文案互相独立，留空即不发。
         """
-        if event.state == STATE_ENTER:
-            template = self._notify_enter_text
-        elif event.state == STATE_EXIT:
-            template = self._notify_exit_text
-        else:
-            return
+        template = {
+            STATE_ENTER: self._notify_enter_text,
+            STATE_EXIT: self._notify_exit_text,
+            STATE_MUTE: self._notify_mute_text,
+            STATE_UNMUTE: self._notify_unmute_text,
+            STATE_MIC_OFF: self._notify_mic_off_text,
+            STATE_MIC_ON: self._notify_mic_on_text,
+        }.get(event.state, "")
         if not template:
             return
         asyncio.create_task(
