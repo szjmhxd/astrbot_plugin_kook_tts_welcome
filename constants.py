@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.3.1"
+PLUGIN_VERSION = "v0.4.0"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -72,6 +72,9 @@ DEFAULT_PLAYBACK_TIMEOUT = 180
 
 # 合成文本的最大长度，防止异常输入把 TTS 打挂
 TTS_TEXT_MAX_CHARS = 120
+# edge-tts 兜底合成的重试次数与重试基数（秒）；微软端点偶发抖动常见，一次失败不代表坏了
+EDGE_TTS_MAX_ATTEMPTS = 3
+EDGE_TTS_RETRY_DELAY = 1.5
 # TTS 结果缓存目录
 TTS_CACHE_DIR_NAME = "tts_cache"
 # 昵称查询缓存有效期（秒）

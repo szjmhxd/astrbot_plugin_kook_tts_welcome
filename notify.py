@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 from astrbot.api import logger
 
@@ -34,6 +35,15 @@ from .constants import (
 from .hooking import VoiceStateEvent
 from .kook_api import KookApiError
 from .utils import to_bool, to_int, to_text
+
+# 文字播报首行时间戳固定用 UTC+8，与服务器时区无关
+NOTIFY_TZ = timezone(timedelta(hours=8))
+
+
+def notify_timestamp() -> str:
+    """yyyy-mm-dd hh-mm-ss-sss（UTC+8），毫秒补零到 3 位。"""
+    now = datetime.now(NOTIFY_TZ)
+    return f"{now:%Y-%m-%d %H-%M-%S}-{now.microsecond // 1000:03d}"
 
 # KOOK 频道类型：1 = 文字频道，2 = 语音频道
 CHANNEL_TYPE_TEXT = 1
@@ -265,9 +275,10 @@ class NotifyMixin:
             )
             if not text:
                 return
-            await self._api.send_message(token, channel_id, text)
-            logger.info(f"[KOOK TTS欢迎] 文字播报已发送到 {channel_id}：{text}")
-            self._trace(f"文字播报已发送（{source}，channel={channel_id}）：{text}")
+            stamp = notify_timestamp()
+            await self._api.send_message(token, channel_id, f"{stamp}\n{text}")
+            logger.info(f"[KOOK TTS欢迎] 文字播报已发送到 {channel_id}：[{stamp}] {text}")
+            self._trace(f"文字播报已发送（{source}，channel={channel_id}）：{stamp} {text}")
         except Exception as exc:
             logger.warning(
                 f"[KOOK TTS欢迎] 文字播报发送失败（channel={channel_id}）：{exc}"
