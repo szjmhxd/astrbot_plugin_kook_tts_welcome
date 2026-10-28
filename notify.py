@@ -41,9 +41,9 @@ NOTIFY_TZ = timezone(timedelta(hours=8))
 
 
 def notify_timestamp() -> str:
-    """yyyy-mm-dd hh-mm-ss-sss（UTC+8），毫秒补零到 3 位。"""
+    """yyyy-mm-dd hh:mm:ss.sss（UTC+8），毫秒补零到 3 位。"""
     now = datetime.now(NOTIFY_TZ)
-    return f"{now:%Y-%m-%d %H-%M-%S}-{now.microsecond // 1000:03d}"
+    return f"{now:%Y-%m-%d %H:%M:%S}.{now.microsecond // 1000:03d}"
 
 # KOOK 频道类型：1 = 文字频道，2 = 语音频道
 CHANNEL_TYPE_TEXT = 1

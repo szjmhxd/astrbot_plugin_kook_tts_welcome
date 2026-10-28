@@ -61,7 +61,7 @@ from .constants import (
     STATE_MUTE,
     STATE_UNMUTE,
     STATES_SUPPORTED,
-    STATES_WITH_EVENTS,
+    STATES_WITH_POLLING,
 )
 from .hooking import (
     HookingMixin,
@@ -253,9 +253,29 @@ class KookTtsWelcomePlugin(
         if event.state not in STATES_SUPPORTED:
             self._trace(f"忽略：未知状态 {event.state}")
             return
-        if source == "gateway" and event.state not in STATES_WITH_EVENTS:
-            # 静音 / 闭麦没有网关事件，只可能来自轮询
+
+        # 静音 / 闭麦：网关事件（add/delete_guild_mute）与轮询共用此入口，
+        # 统一由「启用静音 / 闭麦播报」开关把关
+        if event.state in STATES_WITH_POLLING and not self._mute_notify_enabled:
+            self._trace(
+                f"忽略：静音 / 闭麦播报未开启（{event.state} user={event.user_id}）"
+            )
             return
+
+        # 静音 / 闭麦事件不带频道 ID：按成员最近所在的语音频道定位
+        if event.state in STATES_WITH_POLLING and not event.channel_id:
+            resolved = self._user_voice_channel(event.guild_id, event.user_id)
+            if not resolved:
+                self._trace(
+                    f"忽略：{event.state} user={event.user_id} 找不到所在语音频道"
+                )
+                return
+            event = VoiceStateEvent(
+                state=event.state,
+                user_id=event.user_id,
+                channel_id=resolved,
+                guild_id=event.guild_id,
+            )
 
         self._trace(
             f"收到语音事件（{source}）：state={event.state} user={event.user_id} "
@@ -433,7 +453,7 @@ class KookTtsWelcomePlugin(
             "文字播报频道怎么定：每服务器手动绑定 > 兜底配置 > 自动识别",
             "服务器默认文字频道；三级都没有就不发文字，不会发错地方。",
             "",
-            "静音 / 闭麦：KOOK 网关没有这两类事件，插件轮询 /guild-mute/list",
+            "静音 / 闭麦：网关事件 add/delete_guild_mute 实时推送（服务器级），",
             "的服务器静音名单来识别。只能识别「被服务器静音 / 闭麦」，",
             "用户在客户端自己点的静音官方不暴露。默认关闭，需 /语音欢迎静音播报 开。",
         ]

@@ -128,9 +128,14 @@ class ConfigMixin:
         return self._conf_str("notify_exit_text", DEFAULT_NOTIFY_EXIT)
 
     @property
+    def _mute_notify_enabled(self) -> bool:
+        """静音 / 闭麦播报总开关（网关事件与轮询共用）。"""
+        return self._conf_bool("mute_notify_enabled", False)
+
+    @property
     def _mute_poll_interval(self) -> int:
         """静音 / 闭麦轮询间隔（秒），开关未打开时返回 0（= 不轮询）。"""
-        if not self._conf_bool("mute_notify_enabled", False):
+        if not self._mute_notify_enabled:
             return 0
         raw = self._conf_int("mute_poll_interval", DEFAULT_MUTE_POLL_SECONDS, 0, 300)
         return max(MUTE_POLL_MIN_SECONDS, raw)
@@ -224,15 +229,27 @@ class ConfigMixin:
                 )
                 self._trace(f"配置迁移：{key} 「{legacy}」→「{new}」")
 
-        # v0.4.1 之前用「间隔 > 0」表示开启静音播报，迁移到独立开关
+        # v0.4.1 之前用「间隔 > 0」表示开启静音播报，迁移到独立开关；
+        # 间隔为 0 但填过静音文案的，说明用户想要这个功能，一并开启
         if "mute_notify_enabled" not in self.config:
             old_interval = to_int(self.config.get("mute_poll_interval"), 0)
-            if old_interval > 0:
+            has_template = any(
+                self._conf_str(key)
+                for key in (
+                    "template_mute",
+                    "template_unmute",
+                    "template_mic_off",
+                    "template_mic_on",
+                )
+            )
+            if old_interval > 0 or has_template:
                 self.config["mute_notify_enabled"] = True
                 changed = True
                 logger.info(
-                    "[KOOK TTS欢迎] 已迁移静音播报开关：原轮询间隔 "
-                    f"{old_interval}s > 0，视为开启"
+                    "[KOOK TTS欢迎] 已迁移静音播报开关："
+                    f"原轮询间隔 {old_interval}s"
+                    f"{'，已填静音文案' if has_template and old_interval <= 0 else ''}"
+                    "，视为开启"
                 )
                 self._trace(f"配置迁移：静音播报开关 = 开（原间隔 {old_interval}s）")
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.4.1"
+PLUGIN_VERSION = "v0.4.2"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -23,7 +23,8 @@ KOOK_SYSTEM_MESSAGE_TYPE = 255
 # 语音频道状态
 STATE_ENTER = "enter"
 STATE_EXIT = "exit"
-# 静音 / 闭麦：KOOK 网关没有事件，只能轮询 /guild-mute/list（服务器级静音）
+# 静音 / 闭麦：网关事件 add/delete_guild_mute（服务器级），轮询 /guild-mute/list 兜底
+# （KOOK 网关事件文档未列，Kook.Net 等实现已验证）
 STATE_MUTE = "mute"  # 耳机静音（被服务器静音）
 STATE_UNMUTE = "unmute"
 STATE_MIC_OFF = "mic_off"  # 麦克风闭麦（被服务器闭麦）
@@ -40,6 +41,15 @@ STATES_WITH_POLLING = frozenset(
     {STATE_MUTE, STATE_UNMUTE, STATE_MIC_OFF, STATE_MIC_ON}
 )
 STATES_SUPPORTED = STATES_WITH_EVENTS | STATES_WITH_POLLING
+
+# 服务器静音 / 闭麦的网关事件（官方文档未列，Kook.Net 等实现已验证）：
+# extra.type = add_guild_mute / delete_guild_mute，body = {user_id, guild_id, type}
+# body.type：1 = 麦克风闭麦，2 = 耳机静音
+KOOK_MUTE_EVENT_ADD = "add_guild_mute"
+KOOK_MUTE_EVENT_DELETE = "delete_guild_mute"
+KOOK_MUTE_EVENT_TYPES = frozenset({KOOK_MUTE_EVENT_ADD, KOOK_MUTE_EVENT_DELETE})
+KOOK_MUTE_TYPE_MIC = 1
+KOOK_MUTE_TYPE_HEADSET = 2
 
 # 静音 / 闭麦状态的中文说明，用于 {mute_type} 占位符
 STATE_LABELS = {

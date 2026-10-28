@@ -17,11 +17,27 @@ from astrbot.api import logger
 
 from .constants import (
     KOOK_EVENT_TO_STATE,
+    KOOK_MUTE_EVENT_TYPES,
+    KOOK_MUTE_TYPE_HEADSET,
+    KOOK_MUTE_TYPE_MIC,
     KOOK_SYSTEM_MESSAGE_TYPE,
     STATE_ENTER,
     STATE_EXIT,
+    STATE_MIC_OFF,
+    STATE_MIC_ON,
+    STATE_MUTE,
+    STATE_UNMUTE,
 )
 from .utils import to_int, to_mapping, to_text
+
+# 服务器静音 / 闭麦事件（add_guild_mute / delete_guild_mute）：
+# body = {user_id, guild_id, type}，type 1 = 麦克风闭麦、2 = 耳机静音
+KOOK_MUTE_EVENT_TO_STATE = {
+    ("add_guild_mute", KOOK_MUTE_TYPE_MIC): STATE_MIC_OFF,
+    ("add_guild_mute", KOOK_MUTE_TYPE_HEADSET): STATE_MUTE,
+    ("delete_guild_mute", KOOK_MUTE_TYPE_MIC): STATE_MIC_ON,
+    ("delete_guild_mute", KOOK_MUTE_TYPE_HEADSET): STATE_UNMUTE,
+}
 
 # 用于识别「本插件挂接的回调」，热重载时先解开旧包装，避免重复播放
 _WRAPPER_FLAG = "__kook_tts_welcome_wrapper__"
@@ -55,6 +71,24 @@ def extract_voice_state_event(data: Any) -> VoiceStateEvent | None:
 
     extra = to_mapping(payload.get("extra"))
     event_type = to_text(extra.get("type"))
+
+    # 服务器静音 / 闭麦：body 不带 channel_id，留空由下游按成员位置定位
+    if event_type in KOOK_MUTE_EVENT_TYPES:
+        body = to_mapping(extra.get("body"))
+        user_id = to_text(body.get("user_id"))
+        state = KOOK_MUTE_EVENT_TO_STATE.get(
+            (event_type, to_int(body.get("type"), -1))
+        )
+        if not user_id or state is None:
+            return None
+        guild_id = to_text(body.get("guild_id")) or to_text(payload.get("target_id"))
+        return VoiceStateEvent(
+            state=state,
+            user_id=user_id,
+            channel_id="",
+            guild_id=guild_id,
+        )
+
     state = KOOK_EVENT_TO_STATE.get(event_type)
     if state is None:
         return None
@@ -95,7 +129,7 @@ def describe_unmatched_event(data: Any) -> str | None:
 
     extra = to_mapping(payload.get("extra"))
     event_type = to_text(extra.get("type"))
-    if event_type not in KOOK_EVENT_TO_STATE:
+    if event_type not in KOOK_EVENT_TO_STATE and event_type not in KOOK_MUTE_EVENT_TYPES:
         return None
 
     body = to_mapping(extra.get("body"))
@@ -103,6 +137,7 @@ def describe_unmatched_event(data: Any) -> str | None:
         f"未能提取语音事件：type={event_type} "
         f"user={to_text(body.get('user_id')) or '缺失'} "
         f"channel={to_text(body.get('channel_id')) or '缺失'} "
+        f"mute_type={to_text(body.get('type')) or '-'} "
         f"guild={to_text(payload.get('target_id')) or '缺失'}"
     )
 

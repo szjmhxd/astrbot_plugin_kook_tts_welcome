@@ -180,6 +180,9 @@ class MuteWatchMixin:
     def _emit_polled_state(self, guild_id: str, user_id: str, state: str) -> None:
         """把轮询到的状态变化包装成事件，走与网关事件相同的播报管线。"""
         if not self._has_state_content(state, user_id):
+            self._trace(
+                f"跳过：{state} user={user_id} 未配置播报文案（静音 / 闭麦文案默认为空）"
+            )
             return
         channel_id = self._user_voice_channel(guild_id, user_id)
         if not channel_id:
