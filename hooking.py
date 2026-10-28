@@ -81,6 +81,32 @@ def is_exit_event(data: Any) -> bool:
     return event is not None and event.state == STATE_EXIT
 
 
+def describe_unmatched_event(data: Any) -> str | None:
+    """系统消息是进出事件、但字段残缺导致提取失败时，给出诊断描述。
+
+    普通消息、无关系统事件返回 ``None``（不刷屏）。这个入口解决一个观测盲区：
+    提取失败和「事件根本没到」在诊断日志里都表现为无输出，下次排障分不清。
+    """
+    payload = to_mapping(data)
+    if not payload:
+        return None
+    if to_int(payload.get("type"), -1) != KOOK_SYSTEM_MESSAGE_TYPE:
+        return None
+
+    extra = to_mapping(payload.get("extra"))
+    event_type = to_text(extra.get("type"))
+    if event_type not in KOOK_EVENT_TO_STATE:
+        return None
+
+    body = to_mapping(extra.get("body"))
+    return (
+        f"未能提取语音事件：type={event_type} "
+        f"user={to_text(body.get('user_id')) or '缺失'} "
+        f"channel={to_text(body.get('channel_id')) or '缺失'} "
+        f"guild={to_text(payload.get('target_id')) or '缺失'}"
+    )
+
+
 @dataclass(slots=True)
 class _Hook:
     """一条适配器回调挂接记录。"""

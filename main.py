@@ -62,7 +62,13 @@ from .constants import (
     STATES_SUPPORTED,
     STATES_WITH_EVENTS,
 )
-from .hooking import HookingMixin, VoiceStateEvent, _Hook, extract_voice_state_event
+from .hooking import (
+    HookingMixin,
+    VoiceStateEvent,
+    _Hook,
+    describe_unmatched_event,
+    extract_voice_state_event,
+)
 from .kook_api import KookApi
 from .mute import MuteWatchMixin
 from .notify import NotifyMixin
@@ -110,6 +116,7 @@ class KookTtsWelcomePlugin(
         self._voice_channel = ""
         self._playing = False
         self._last_finished = 0.0
+        self._gateway_events = 0  # 本次启动收到的网关事件数（区分「没事件」与「没认出来」）
         self._ffmpeg_cache: tuple[bool, str] | None = None
         self._ffmpeg_proc: asyncio.subprocess.Process | None = None
         self._stream_aborted = False
@@ -204,8 +211,14 @@ class KookTtsWelcomePlugin(
 
     async def _on_kook_event(self, adapter: Any, data: Any) -> None:
         """处理包装回调捕获到的每一条 KOOK 网关事件。"""
+        self._gateway_events += 1
         event = extract_voice_state_event(data)
         if event is None:
+            # 提取失败是静默路径，不留痕就分不清「事件没到」和「到了但没认出来」
+            unmatched = describe_unmatched_event(data)
+            if unmatched:
+                logger.warning(f"[KOOK TTS欢迎] {unmatched}")
+                self._trace(unmatched)
             return
         self._handle_state_event(event, source="gateway")
 
@@ -378,6 +391,8 @@ class KookTtsWelcomePlugin(
             + ("" if ffmpeg_ok else f"（{ffmpeg_detail}）"),
             f"Bot Token：{token_ready} / KOOK 适配器：{adapters} 个",
             f"运行状态：{state}",
+            f"网关事件：本次启动收到 {self._gateway_events} 条"
+            "（语音进出有反应但这里为 0 = 事件没进插件）",
             f"诊断日志：{self._log_file}",
         ]
         yield event.plain_result("\n".join(lines))
