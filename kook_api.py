@@ -300,14 +300,15 @@ class KookApi:
     async def send_message(
         self, token: str, channel_id: str, content: str
     ) -> dict[str, Any]:
-        """向文字频道发送文本消息。
+        """向文字频道发送纯文本消息。
 
-        KOOK 文本消息（type=1）的 ``content`` 需要是 JSON 字符串
-        ``{"content": "..."}``，这是接口的特殊约定。
+        ``/message/create`` 的 ``content`` 直接放正文。早期版本误按
+        ``send-pipemsg`` 的约定包了一层 ``{"content": ...}`` JSON，
+        结果频道里显示的就是裸 JSON。
         """
         payload = {
             "target_id": channel_id,
-            "content": json.dumps({"content": content}, ensure_ascii=False),
+            "content": content,
             "type": 1,
         }
         return await self.request("POST", "/message/create", token, payload=payload)

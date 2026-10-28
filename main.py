@@ -46,6 +46,7 @@ from .config import ConfigMixin
 from .constants import (
     DEFAULT_ENTER_TEMPLATE,
     DEFAULT_EXIT_TEMPLATE,
+    DEFAULT_MUTE_POLL_SECONDS,
     MUTE_POLL_MIN_SECONDS,
     PLUGIN_NAME,
     PLUGIN_VERSION,
@@ -776,7 +777,7 @@ class KookTtsWelcomePlugin(
             return
 
         if arg in ("关", "关闭", "off", "disable"):
-            self.config["mute_poll_interval"] = 0
+            self.config["mute_notify_enabled"] = False
             saved = self._save_config("关闭静音播报")
             yield event.plain_result(
                 f"{'已关闭' if saved else '保存失败'}静音 / 闭麦播报"
@@ -784,9 +785,10 @@ class KookTtsWelcomePlugin(
             return
 
         if arg in ("开", "on", "enable"):
-            interval = 5
+            interval = DEFAULT_MUTE_POLL_SECONDS
             if len(parts) > 1 and parts[1].strip().isdigit():
                 interval = max(MUTE_POLL_MIN_SECONDS, int(parts[1].strip()))
+            self.config["mute_notify_enabled"] = True
             self.config["mute_poll_interval"] = interval
             saved = self._save_config("开启静音播报")
             missing = [
@@ -824,7 +826,7 @@ class KookTtsWelcomePlugin(
             f"状态文案：{templates}\n"
             f"正在跟踪的服务器：{watched} 个\n"
             "说明：只能识别服务器级静音 / 闭麦（/guild-mute/list），"
-            "客户端自己点的静音官方不暴露。"
+            "自己在客户端点的静音官方不暴露。"
         )
 
     @filter.command("语音欢迎试听")

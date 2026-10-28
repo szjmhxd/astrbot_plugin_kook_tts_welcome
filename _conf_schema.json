@@ -61,22 +61,28 @@
   "notify_enter_text": {
     "type": "text",
     "description": "文字播报 · 进入文案",
-    "hint": "占位符：{nickname} {username} {user_id} {channel} {guild}。留空则不发进入通知。",
-    "default": "{nickname} 进入了语音频道 {channel}"
+    "hint": "占位符：{nickname} {username} {user_id} {channel} {guild}。留空则不发进入通知。发出的消息第一行是 UTC+8 时间戳，第二行是这里渲染的正文。",
+    "default": "{nickname} 进入了「{channel}」"
   },
   "notify_exit_text": {
     "type": "text",
     "description": "文字播报 · 退出文案",
     "hint": "占位符同上。留空则不发退出通知。",
-    "default": "{nickname} 退出了语音频道 {channel}"
+    "default": "{nickname} 退出了「{channel}」"
+  },
+  "mute_notify_enabled": {
+    "type": "bool",
+    "description": "启用静音 / 闭麦播报",
+    "hint": "打开后才会轮询服务器静音名单并播报。注意：只能识别「被服务器静音 / 闭麦」（管理员操作），自己在客户端点的静音官方不暴露，拿不到。",
+    "default": false
   },
   "mute_poll_interval": {
     "type": "int",
     "description": "静音 / 闭麦轮询间隔（秒）",
-    "hint": "KOOK 没有静音 / 闭麦事件，插件只能轮询服务器的静音名单。0 = 关闭。开启后需要同时填下方的静音 / 闭麦播报文案才会出声。只在最近有语音活动的服务器上轮询。",
-    "default": 0,
+    "hint": "轮询服务器静音名单的间隔，仅在上方开关打开时生效。只在最近有语音活动的服务器上轮询，避免无意义请求。",
+    "default": 5,
     "slider": {
-      "min": 0,
+      "min": 3,
       "max": 60,
       "step": 1
     }
@@ -84,7 +90,7 @@
   "template_mute": {
     "type": "text",
     "description": "静音播报文案",
-    "hint": "被服务器静音时播报。占位符同上，另可用 {mute_type}。留空 = 不播报。需要先把「静音 / 闭麦轮询间隔」设为大于 0。",
+    "hint": "被服务器静音时播报。占位符同上，另可用 {mute_type}。留空 = 不播报。需要先打开「启用静音 / 闭麦播报」。",
     "default": ""
   },
   "template_unmute": {

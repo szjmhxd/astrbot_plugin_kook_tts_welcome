@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.4.0"
+PLUGIN_VERSION = "v0.4.1"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -93,8 +93,10 @@ LEGACY_ENTER_TEMPLATE = "欢迎 {nickname} 进入语音频道"
 LEGACY_EXIT_TEMPLATE = "再见，{nickname}"
 
 # 文字频道同步播报的默认文案（留空模板 = 关闭对应通知）
-DEFAULT_NOTIFY_ENTER = "{nickname} 进入了语音频道 {channel}"
-DEFAULT_NOTIFY_EXIT = "{nickname} 退出了语音频道 {channel}"
+DEFAULT_NOTIFY_ENTER = "{nickname} 进入了「{channel}」"
+DEFAULT_NOTIFY_EXIT = "{nickname} 退出了「{channel}」"
+LEGACY_NOTIFY_ENTER = "{nickname} 进入了语音频道 {channel}"
+LEGACY_NOTIFY_EXIT = "{nickname} 退出了语音频道 {channel}"
 
 # 静音 / 闭麦播报默认关闭（留空 = 不播报）。开启后需要轮询接口，
 # 且每次状态变化都要进出语音频道，默认不打扰。
@@ -104,7 +106,7 @@ DEFAULT_TEMPLATE_MIC_OFF = ""
 DEFAULT_TEMPLATE_MIC_ON = ""
 
 # 静音 / 闭麦轮询间隔（秒），0 = 关闭
-DEFAULT_MUTE_POLL_SECONDS = 0
+DEFAULT_MUTE_POLL_SECONDS = 5
 # 服务器没有语音活动后多久停止轮询（秒）
 MUTE_POLL_IDLE_SECONDS = 900
 # 轮询间隔下限，防止配置过小打爆接口

@@ -23,6 +23,8 @@ from .constants import (
     DEFAULT_START_DELAY_MS,
     LEGACY_ENTER_TEMPLATE,
     LEGACY_EXIT_TEMPLATE,
+    LEGACY_NOTIFY_ENTER,
+    LEGACY_NOTIFY_EXIT,
     LOG_MAX_BYTES,
     MULTI_USER_POLICIES,
     MUTE_POLL_MIN_SECONDS,
@@ -127,9 +129,11 @@ class ConfigMixin:
 
     @property
     def _mute_poll_interval(self) -> int:
-        """静音 / 闭麦轮询间隔（秒），0 = 关闭。"""
+        """静音 / 闭麦轮询间隔（秒），开关未打开时返回 0（= 不轮询）。"""
+        if not self._conf_bool("mute_notify_enabled", False):
+            return 0
         raw = self._conf_int("mute_poll_interval", DEFAULT_MUTE_POLL_SECONDS, 0, 300)
-        return 0 if raw <= 0 else max(MUTE_POLL_MIN_SECONDS, raw)
+        return max(MUTE_POLL_MIN_SECONDS, raw)
 
     @property
     def _leave_delay(self) -> int:
@@ -200,13 +204,15 @@ class ConfigMixin:
         self._trace(f"诊断日志：{self._log_file}")
 
     def _migrate_config(self) -> None:
-        """把历史版本写入配置的旧默认文案升级为带 {channel} 的新默认。
+        """把历史版本写入配置的旧默认文案升级为新默认。
 
         只在当前值与旧默认**完全一致**时替换；用户自己改过的文案不动。
         """
         migrations = (
             ("template_enter", LEGACY_ENTER_TEMPLATE, DEFAULT_ENTER_TEMPLATE),
             ("template_exit", LEGACY_EXIT_TEMPLATE, DEFAULT_EXIT_TEMPLATE),
+            ("notify_enter_text", LEGACY_NOTIFY_ENTER, DEFAULT_NOTIFY_ENTER),
+            ("notify_exit_text", LEGACY_NOTIFY_EXIT, DEFAULT_NOTIFY_EXIT),
         )
         changed = False
         for key, legacy, new in migrations:
@@ -217,6 +223,19 @@ class ConfigMixin:
                     f"[KOOK TTS欢迎] 已升级默认文案 {key}：「{legacy}」→「{new}」"
                 )
                 self._trace(f"配置迁移：{key} 「{legacy}」→「{new}」")
+
+        # v0.4.1 之前用「间隔 > 0」表示开启静音播报，迁移到独立开关
+        if "mute_notify_enabled" not in self.config:
+            old_interval = to_int(self.config.get("mute_poll_interval"), 0)
+            if old_interval > 0:
+                self.config["mute_notify_enabled"] = True
+                changed = True
+                logger.info(
+                    "[KOOK TTS欢迎] 已迁移静音播报开关：原轮询间隔 "
+                    f"{old_interval}s > 0，视为开启"
+                )
+                self._trace(f"配置迁移：静音播报开关 = 开（原间隔 {old_interval}s）")
+
         if changed:
             self._save_config("升级默认文案")
 
