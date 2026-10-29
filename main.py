@@ -253,6 +253,12 @@ class KookTtsWelcomePlugin(
 
         if not self._enabled:
             return
+        if not event.guild_id and self._enabled_guild_ids:
+            # 已限定启用范围但事件没带服务器 ID：无法确认，按不放行处理
+            self._trace(
+                f"忽略：事件未携带服务器 ID，且已限定启用范围（state={event.state}）"
+            )
+            return
         if event.guild_id and not self._guild_enabled(event.guild_id):
             self._trace(f"忽略：服务器 {event.guild_id} 不在启用范围内")
             if event.guild_id not in self._scope_warned:
@@ -380,6 +386,13 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_status(self, event: AstrMessageEvent):
         """查看 KOOK TTS 语音欢迎插件的当前状态"""
+        ctx = await self._channel_context(event)
+        guild_id = ctx["guild_id"]
+        blocked = await self._scope_gate(event, ctx)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
+
         ffmpeg_ok, ffmpeg_detail = await self._check_ffmpeg()
         token_ready = "已配置" if self._resolve_token() else "未获取"
         adapters = len(self._iter_kook_adapters())
@@ -398,8 +411,6 @@ class KookTtsWelcomePlugin(
         }.get(self._multi_user_policy, self._multi_user_policy)
 
         # 本服务器的文字播报频道（按三级兜底实时解析）
-        ctx = await self._channel_context(event)
-        guild_id = ctx["guild_id"]
         token = self._resolve_token()
         notify_channel, notify_source = ("", "")
         if token and guild_id:
@@ -458,6 +469,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_help(self, event: AstrMessageEvent):
         """查看 KOOK TTS 语音欢迎插件指令列表"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         lines = [
             "🎧 KOOK TTS 语音欢迎 · 指令帮助",
             "",
@@ -505,6 +520,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_notify_channel(self, event: AstrMessageEvent):
         """设置**本服务器**的文字播报频道（多服务器各管各的）"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎文字频道")
         arg = parts[0].strip() if parts else "当前"
 
@@ -619,6 +638,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_target_channel(self, event: AstrMessageEvent):
         """目标语音频道绑定：/语音欢迎目标频道 当前|<频道ID>|自动|关闭|列表"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎目标频道")
         arg = parts[0].strip().lower() if parts else "列表"
         ctx = await self._channel_context(event)
@@ -693,6 +716,30 @@ class KookTtsWelcomePlugin(
         info["name"] = to_text(channel.get("name"))
         return info
 
+    async def _scope_gate(
+        self, event: AstrMessageEvent, ctx: dict[str, str] | None = None
+    ) -> str:
+        """服务器范围把关。
+
+        返回非空字符串 = 本服务器不在「目标服务器 ID」范围内，调用方直接回复该文本
+        并 return。非启用服务器里插件应当像没装一样：不回应业务内容，只回一句
+        「未启用 + 本服务器 ID」，顺带把 ID 告诉用户——查 ID 是最容易搞错的一步
+        （/sid 里的 Session ID 是文字频道 ID，不是服务器 ID）。
+
+        取不到 guild_id（token 缺失 / 接口失败）时放行，避免配错 Token 把自己锁死。
+        """
+        ctx = ctx or await self._channel_context(event)
+        guild_id = ctx["guild_id"]
+        if not guild_id or self._guild_enabled(guild_id):
+            return ""
+        scope = "、".join(sorted(self._enabled_guild_ids)) or "（空）"
+        return (
+            f"本服务器（{guild_id}）未在「目标服务器 ID」范围内，语音欢迎不生效。\n"
+            f"当前范围：{scope}\n"
+            "启用方法：把这个服务器 ID 加进配置（多个用 ; 分割），"
+            "或清空该配置 = 全部服务器生效。"
+        )
+
     @staticmethod
     def _current_text_channel_id(event: AstrMessageEvent) -> str:
         """从指令事件里取当前文字频道 ID（KOOK 的 group_id / session_id 即频道 ID）。"""
@@ -717,6 +764,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_template(self, event: AstrMessageEvent):
         """设置状态播报模板：/语音欢迎模板 enter|exit <文案>"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎模板", maxsplit=1)
         if len(parts) < 2:
             yield event.plain_result(
@@ -756,6 +807,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_user_template(self, event: AstrMessageEvent):
         """指定用户定制文案：/语音欢迎定制 <用户ID> enter|exit <文案>"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎定制", maxsplit=2)
         if len(parts) < 3:
             yield event.plain_result(
@@ -791,6 +846,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_user_template_delete(self, event: AstrMessageEvent):
         """删除指定用户的定制文案：/语音欢迎定制删除 <用户ID>"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎定制删除")
         if not parts or not parts[0].isdigit():
             yield event.plain_result("用法：/语音欢迎定制删除 <用户ID>")
@@ -811,6 +870,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_user_audio(self, event: AstrMessageEvent):
         """指定用户的定制音频：/语音欢迎定制音频 <用户ID> enter|exit <路径或链接>"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎定制音频", maxsplit=2)
         if len(parts) < 3:
             yield event.plain_result(
@@ -854,6 +917,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_user_audio_delete(self, event: AstrMessageEvent):
         """删除指定用户的定制音频：/语音欢迎定制音频删除 <用户ID> [状态]"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎定制音频删除")
         if not parts or not parts[0].isdigit():
             yield event.plain_result(
@@ -886,6 +953,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_mute_watch(self, event: AstrMessageEvent):
         """静音 / 闭麦播报开关：/语音欢迎静音播报 开 [秒]|关|状态"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         parts = self._strip_command(event.message_str, "语音欢迎静音播报")
         arg = parts[0].strip().lower() if parts else "状态"
         current = self._mute_poll_interval
@@ -955,6 +1026,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_preview(self, event: AstrMessageEvent):
         """试听：/语音欢迎试听 [文案] —— 合成并推流到事件所在语音频道"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         text = self._strip_command(event.message_str, "语音欢迎试听", maxsplit=1)
         speak = text[0].strip() if text else ""
         if not speak:
@@ -999,6 +1074,10 @@ class KookTtsWelcomePlugin(
     @filter.platform_adapter_type(filter.PlatformAdapterType.KOOK)
     async def cmd_reload(self, event: AstrMessageEvent):
         """重新读取配置、定制文案并检测 FFmpeg"""
+        blocked = await self._scope_gate(event)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
         self._user_templates = self._load_user_templates()
         self._notify_channels = self._load_notify_channels()
         self._ffmpeg_cache = None
