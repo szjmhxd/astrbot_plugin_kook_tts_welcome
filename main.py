@@ -119,6 +119,7 @@ class KookTtsWelcomePlugin(
         self._playing = False
         self._last_finished = 0.0
         self._gateway_events = 0  # 本次启动收到的网关事件数（区分「没事件」与「没认出来」）
+        self._scope_warned: set[str] = set()  # 已提示过「不在启用范围」的服务器，防刷屏
         self._ffmpeg_cache: tuple[bool, str] | None = None
         self._ffmpeg_proc: asyncio.subprocess.Process | None = None
         self._stream_aborted = False
@@ -254,6 +255,15 @@ class KookTtsWelcomePlugin(
             return
         if event.guild_id and not self._guild_enabled(event.guild_id):
             self._trace(f"忽略：服务器 {event.guild_id} 不在启用范围内")
+            if event.guild_id not in self._scope_warned:
+                self._scope_warned.add(event.guild_id)
+                scope = "、".join(sorted(self._enabled_guild_ids)) or "（空）"
+                logger.warning(
+                    f"[KOOK TTS欢迎] 服务器 {event.guild_id} 的事件被「目标服务器 ID」"
+                    f"过滤掉了（当前配置：{scope}）。上面这串才是服务器 ID；"
+                    "如果填错了（比如填成 /sid 的 Session ID / 频道 ID），"
+                    "请改成这串 ID，或清空该配置 = 所有服务器启用"
+                )
             return
         if event.state not in STATES_SUPPORTED:
             self._trace(f"忽略：未知状态 {event.state}")
@@ -402,6 +412,18 @@ class KookTtsWelcomePlugin(
             else "不会发送（本服务器没有可用文字频道）"
         )
         bound = self._notify_channels.get(guild_id, "") if guild_id else ""
+        scope_ids = self._enabled_guild_ids
+        if not scope_ids:
+            scope_text = "全部服务器都启用（目标服务器 ID 为空）"
+        elif not guild_id:
+            scope_text = f"已限定 {len(scope_ids)} 个服务器（本服务器 ID 未知，无法判断）"
+        elif self._guild_enabled(guild_id):
+            scope_text = "本服务器在启用范围内 ✓"
+        else:
+            scope_text = (
+                f"⚠️ 本服务器**不在**启用范围内，事件全部被忽略！"
+                f"（目标服务器 ID 当前是：{'、'.join(sorted(scope_ids))}）"
+            )
         mute = self._mute_poll_interval
         mute_label = f"每 {mute} 秒轮询服务器静音名单" if mute else "关闭"
 
@@ -414,7 +436,9 @@ class KookTtsWelcomePlugin(
             f"进入文案：{self._state_template(STATE_ENTER) or '（未配置）'}",
             f"退出文案：{self._state_template(STATE_EXIT) or '（未配置）'}",
             f"多人策略：{policy_label}",
-            f"服务器：{guild_id or '未知'}（本服务器手动绑定：{bound or '无'}）",
+            f"本服务器 ID：{guild_id or '未知'}　←「目标服务器 ID」填的就是这串数字",
+            f"启用范围：{scope_text}",
+            f"文字频道手动绑定：{bound or '无'}",
             f"文字播报：{notify}",
             f"静音/闭麦播报：{mute_label}",
             f"定制用户：{len(self._user_templates)} 人",
