@@ -24,6 +24,16 @@
 - ``playback.py``    播报队列与推流流程
 - ``resources.py``   Token / FFmpeg 资源解析
 
+⚠️ 开发约定（改代码前必读）
+-------------------------
+所有 ``@filter.*`` 指令 / 事件钩子**必须**写在 ``main.py`` 的
+``KookTtsWelcomePlugin`` 类里。AstrBot 的 ``StarHandlerRegistry`` 用
+``handler_module_path == "data.plugins.<目录名>.main"`` 做**精确匹配**来归属
+handler，写在本目录其它 .py（``tts.py`` / ``notify.py`` …）里的 handler 模块
+路径不会等于 ``…main``，会被静默丢弃——指令不响应、不报错、日志无痕。
+
+其它文件只能放**普通方法**（服务实现），由插件类通过 Mixin 继承调用。
+
 开发者文档：https://docs.astrbot.app/dev/star/plugin-new.html
 KOOK 语音接口：https://developer.kookapp.cn/doc/http/voice
 """
@@ -40,7 +50,7 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 
 from .config import ConfigMixin
 from .constants import (
@@ -49,18 +59,17 @@ from .constants import (
     DEFAULT_MUTE_POLL_SECONDS,
     MUTE_POLL_MIN_SECONDS,
     PLUGIN_NAME,
-    PLUGIN_VERSION,
     POLICY_IGNORE,
     POLICY_INTERRUPT,
     POLICY_MERGE,
     STATE_ENTER,
-    STATE_VOICE_TEMPLATE_PATH,
     STATE_EXIT,
     STATE_LABELS,
     STATE_MIC_OFF,
     STATE_MIC_ON,
     STATE_MUTE,
     STATE_UNMUTE,
+    STATE_VOICE_TEMPLATE_PATH,
     STATES_SUPPORTED,
     STATES_WITH_POLLING,
 )
@@ -80,12 +89,6 @@ from .tts import TtsMixin
 from .utils import to_text
 
 
-@register(
-    PLUGIN_NAME,
-    "szjm",
-    "成员进入 KOOK 语音频道时，按用户昵称实时合成欢迎语音并播放",
-    PLUGIN_VERSION,
-)
 class KookTtsWelcomePlugin(
     TtsMixin,
     NotifyMixin,
@@ -96,14 +99,17 @@ class KookTtsWelcomePlugin(
     ConfigMixin,
     Star,
 ):
-    """插件主体：生命周期 + 指令 handler，实现分布在各 Mixin 中。"""
+    """插件主体：生命周期 + 指令 handler，实现分布在各 Mixin 中。
+
+    元数据全部来自同目录的 ``metadata.yaml``（AstrBot 会自动识别继承了
+    ``Star`` 的类，无需 ``@register`` 装饰器）。
+    """
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
         self.config = config
 
         self._data_dir = self._resolve_data_dir()
-        self._plugin_dir = Path(__file__).resolve().parent
         self._log_file = self._data_dir / "logs" / "kook_tts_welcome.log"
         self._api = KookApi()
 
@@ -112,6 +118,8 @@ class KookTtsWelcomePlugin(
         self._attach_task: asyncio.Task | None = None
         self._ffmpeg_task: asyncio.Task | None = None
         self._mute_task: asyncio.Task | None = None
+        # 散装后台任务（昵称预取 / 文字播报）：必须留引用，否则可能被 GC 回收
+        self._bg_tasks: set[asyncio.Task] = set()
 
         self._hooks: dict[str, _Hook] = {}
         self._bot_id = ""
@@ -135,6 +143,10 @@ class KookTtsWelcomePlugin(
         self._notify_channels: dict[str, str] = self._load_notify_channels()
         self._target_channels: dict[str, str] = self._load_target_channels()
         self._guild_info_cache: dict[str, tuple[float, dict]] = {}
+        self._voice_channel_cache: dict[str, tuple[float, list]] = {}
+        # 最近一次网关事件里出现过的语音频道（guild_id → channel_id），
+        # 频道列表查不到时作为最后兜底；空字符串键表示「不知道服务器」
+        self._last_voice_channel: dict[str, str] = {}
         self._text_channel_cache: dict[str, tuple[float, str, str]] = {}
 
         # 静音 / 闭麦轮询：名单快照、活动服务器、成员所在频道
@@ -190,6 +202,14 @@ class KookTtsWelcomePlugin(
         self._mute_task = None
         self._merge_buffer.clear()
 
+        # 散装后台任务（昵称预取 / 文字播报）一并收掉，避免卸载后还在跑
+        pending = [task for task in self._bg_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._bg_tasks.clear()
+
         token = self._resolve_token()
         channel = self._voice_channel
         proc = self._ffmpeg_proc
@@ -208,6 +228,28 @@ class KookTtsWelcomePlugin(
         await self._api.close()
         self._trace("插件卸载：已还原回调并释放语音资源")
         logger.info("[KOOK TTS欢迎] 插件已卸载，语音资源已释放")
+
+    # ------------------------------------------------------------------ #
+    # 后台任务
+    # ------------------------------------------------------------------ #
+
+    def _spawn_bg(self, coro: Any, name: str) -> asyncio.Task | None:
+        """启动一个「发射后不管」的后台任务，并保留引用。
+
+        ``asyncio.create_task`` 的返回值必须被持有：事件循环只保留弱引用，
+        任务执行途中可能被 GC 回收（官方文档明确要求保存引用）。这里统一登记
+        到 ``_bg_tasks``，任务结束时自动移除，插件卸载时统一取消。
+        """
+        try:
+            task = asyncio.create_task(coro, name=name)
+        except RuntimeError as exc:  # 没有运行中的事件循环
+            logger.warning(f"[KOOK TTS欢迎] 无法创建后台任务 {name}：{exc}")
+            self._trace(f"无法创建后台任务 {name}：{exc!r}")
+            coro.close()
+            return None
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     # ------------------------------------------------------------------ #
     # KOOK 事件分发
@@ -235,6 +277,9 @@ class KookTtsWelcomePlugin(
         """
         if event.guild_id:
             self._note_guild_activity(event.guild_id)
+        # 记住最近一次真实事件里的语音频道：频道列表接口挂掉时，试听还能用它
+        if event.channel_id and event.state in (STATE_ENTER, STATE_EXIT):
+            self._last_voice_channel[event.guild_id or ""] = event.channel_id
         if event.state in (STATE_ENTER, STATE_EXIT):
             self._track_user_voice(event)
 
@@ -327,7 +372,7 @@ class KookTtsWelcomePlugin(
         # 合并策略：攒够窗口一次性播报
         if policy == POLICY_MERGE:
             self._buffer_for_merge(event)
-            asyncio.create_task(
+            self._spawn_bg(
                 self._prefetch_nickname(event.user_id, event.guild_id),
                 name=f"{PLUGIN_NAME}-prefetch",
             )
@@ -343,7 +388,7 @@ class KookTtsWelcomePlugin(
                 f"{event.channel_id}，打断并播报"
             )
             self._trace(f"打断策略入队：state={event.state} user={event.user_id}")
-            asyncio.create_task(
+            self._spawn_bg(
                 self._prefetch_nickname(event.user_id, event.guild_id),
                 name=f"{PLUGIN_NAME}-prefetch",
             )
@@ -368,7 +413,7 @@ class KookTtsWelcomePlugin(
         self._trace(f"已加入播报队列：state={event.state} user={event.user_id}")
 
         # 预取昵称：与队列调度并行，worker 启动时多半已命中缓存
-        asyncio.create_task(
+        self._spawn_bg(
             self._prefetch_nickname(event.user_id, event.guild_id),
             name=f"{PLUGIN_NAME}-prefetch",
         )
@@ -438,9 +483,19 @@ class KookTtsWelcomePlugin(
         mute = self._mute_poll_interval
         mute_label = f"每 {mute} 秒轮询服务器静音名单" if mute else "关闭"
 
+        # 权限自检：KOOK 适配器不携带 role，框架只认 AstrBot「管理员 ID」列表
+        is_admin = event.is_admin()
+        identity = (
+            "管理员 ✓ 可用管理员指令"
+            if is_admin
+            else "普通成员 ✗ 管理员指令会被框架拦截（见 /语音欢迎帮助）"
+        )
+
         lines = [
             "🎧 KOOK TTS 语音欢迎",
             f"插件状态：{'已启用' if self._enabled else '已关闭'}",
+            f"你的权限：{identity}",
+            f"你的用户 ID：{event.get_sender_id()}　← 加管理员时填这串数字",
             f"监听频道：{self._target_channel_for(guild_id) or '自动跟随事件频道'}",
             f"进入语音：{'开' if self._welcome_voice_enabled else '关'} / "
             f"退出语音：{'开' if self._exit_voice_enabled else '关'}",
@@ -480,7 +535,11 @@ class KookTtsWelcomePlugin(
             "· /语音欢迎 —— 查看插件状态",
             "· /语音欢迎帮助 —— 查看本帮助",
             "",
-            "管理员指令",
+            "管理员指令（需先把自己加进 AstrBot 管理员）",
+            "· 设置方法：WebUI → 配置 → 访问控制 → 管理员 → 管理员 ID",
+            "  把你发 /sid 拿到的 UID 加进去并保存，再回来执行指令",
+            "· KOOK 不向机器人提供成员角色，插件无法自行判断谁是管理员，",
+            "  这条检查在框架层完成，权限不足时指令根本到不了插件。",
             "· /语音欢迎模板 enter|exit <文案> —— 设置状态播报模板",
             "· /语音欢迎定制 <用户ID> enter|exit <文案> —— 指定用户定制文案",
             "· /语音欢迎定制音频 <用户ID> enter|exit <路径或链接> —— 指定用户播放定制音频",
@@ -489,7 +548,8 @@ class KookTtsWelcomePlugin(
             "· /语音欢迎文字频道 列表 —— 查看各服务器的文字频道绑定",
             "· /语音欢迎目标频道 当前|<频道ID>|自动|关闭|列表 —— 设置【本服务器】目标语音频道",
             "· /语音欢迎静音播报 开 [秒]|关 —— 静音 / 闭麦状态播报",
-            "· /语音欢迎试听 [文案] —— 合成一段语音并在频道里试听",
+            "· /语音欢迎试听 [文案] —— 合成一段语音并在语音频道试听"
+            "（未绑定目标频道时自动选服务器唯一的语音频道）",
             "· /语音欢迎重载 —— 重新读取配置与定制文案",
             "",
             "模板占位符：{nickname} 服务器昵称 / {username} 用户名 / {user_id} / "
@@ -561,9 +621,7 @@ class KookTtsWelcomePlugin(
             self._conf_set("strategy.notify_text_channel_id", sub)
             self._clear_text_channel_cache()
             saved = self._save_config("设置兜底文字频道")
-            ok, detail = (False, "Bot Token 未就绪")
-            if token:
-                ok, detail = await self._send_test_notice(token, sub)
+            ok, detail = await self._send_test_notice(token, sub)
             yield event.plain_result(
                 f"{'已设置' if saved else '保存失败'}兜底文字频道：{sub}"
                 "（所有服务器共用，优先级高于自动识别）\n"
@@ -624,9 +682,7 @@ class KookTtsWelcomePlugin(
             yield event.plain_result("保存绑定失败，请查看日志")
             return
 
-        ok, detail = (False, "Bot Token 未就绪")
-        if token:
-            ok, detail = await self._send_test_notice(token, channel_id)
+        ok, detail = await self._send_test_notice(token, channel_id)
         yield event.plain_result(
             f"已绑定：服务器 {guild_id} → 文字频道 {channel_id}"
             f"（{ctx['name'] or '名称未知'}）\n"
@@ -715,6 +771,103 @@ class KookTtsWelcomePlugin(
         info["guild_id"] = to_text(channel.get("guild_id"))
         info["name"] = to_text(channel.get("name"))
         return info
+
+    async def _auto_pick_voice_channel(
+        self, guild_id: str, text_channel_id: str = ""
+    ) -> tuple[str, str]:
+        """试听没指定目标频道时的兜底：服务器只有一个语音频道就自动用它。
+
+        返回 ``(频道 ID, 给用户看的说明)``。选不出来时 ID 为空，说明里写清原因，
+        避免用户对着「未指定」四个字猜。
+
+        ⚠️ 两个 ID 千万不能混：KOOK 适配器里 ``event.get_group_id()`` 给的是
+        **频道 ID**，不是服务器 ID。拿频道 ID 去调 ``/channel/list`` 会得到
+        ``code=40000 guild_id 不存在``。所以这里先用 ``/channel/view`` 反推
+        服务器 ID，实在不行再退到机器人已加入的服务器列表。
+        """
+        token = self._resolve_token()
+        if not token:
+            return "", "未指定（Bot Token 未就绪，无法查询语音频道）"
+
+        notes: list[str] = []
+        candidates: list[str] = []
+
+        # 1) 由当前文字频道反推服务器 ID（最可靠）
+        if text_channel_id:
+            try:
+                channel = await self._api.get_channel(token, text_channel_id)
+                resolved = to_text(channel.get("guild_id"))
+                if resolved:
+                    candidates.append(resolved)
+                else:
+                    notes.append(f"频道 {text_channel_id} 没返回 guild_id")
+            except Exception as exc:
+                notes.append(f"查频道 {text_channel_id} 失败：{exc}")
+
+        # 2) 调用方给的 guild_id（可能已经是服务器 ID）
+        if guild_id and guild_id not in candidates:
+            candidates.append(guild_id)
+
+        # 3) 都没有：用机器人已加入的服务器列表兜底
+        if not candidates:
+            try:
+                for guild in await self._api.get_guilds(token):
+                    gid = to_text(guild.get("id"))
+                    if gid and gid not in candidates:
+                        candidates.append(gid)
+            except Exception as exc:
+                notes.append(f"查服务器列表失败：{exc}")
+
+        for gid in candidates:
+            try:
+                voices = await self._voice_channels_of_guild(token, gid)
+            except Exception as exc:
+                self._trace(f"试听：查服务器 {gid} 的语音频道失败：{exc!r}")
+                notes.append(f"服务器 {gid}：{exc}")
+                continue
+            if not voices:
+                notes.append(f"服务器 {gid}：接口正常但没有语音频道")
+                continue
+            if len(voices) == 1:
+                channel_id = to_text(voices[0].get("id"))
+                name = to_text(voices[0].get("name")) or channel_id
+                self._trace(
+                    f"试听：自动选择唯一语音频道 {channel_id}（{name}，guild={gid}）"
+                )
+                return (
+                    channel_id,
+                    f"{channel_id}（{name}，服务器只有这一个语音频道，已自动选中）",
+                )
+            listing = "、".join(
+                f"{to_text(channel.get('name')) or '未命名'}"
+                f"({to_text(channel.get('id'))})"
+                for channel in voices[:8]
+            )
+            more = f" 等 {len(voices)} 个" if len(voices) > 8 else ""
+            return (
+                "",
+                f"未指定（有多个语音频道{more}，请用 /语音欢迎目标频道 <频道ID> 指定）："
+                f"{listing}",
+            )
+
+        # 4) 最后兜底：本次会话里最近一次播报用过的语音频道
+        last = self._last_voice_channel.get(guild_id or "", "")
+        if not last:
+            last = next(iter(self._last_voice_channel.values()), "")
+        if last:
+            self._trace(f"试听：频道查询全部失败，退回最近用过的语音频道 {last}")
+            return (
+                last,
+                f"{last}（查不到频道列表，改用最近一次播报过的语音频道）",
+            )
+
+        detail = "；".join(notes[:3])
+        return (
+            "",
+            "未指定（拿不到这个服务器的语音频道）。"
+            + (f"\n排查信息：{detail}" if detail else "")
+            + "\n可先用 /语音欢迎目标频道 <语音频道ID> 手动指定。",
+        )
 
     async def _scope_gate(
         self, event: AstrMessageEvent, ctx: dict[str, str] | None = None
@@ -1037,12 +1190,17 @@ class KookTtsWelcomePlugin(
             speak = self._build_speak_text(STATE_ENTER, "0", names) or "这是一条试听语音"
 
         user_id = getattr(event, "get_sender_id", lambda: "")()
-        guild_id = ""
-        try:
-            guild_id = str(getattr(event, "get_group_id", lambda: "")() or "")
-        except Exception:
-            guild_id = ""
+        # ⚠️ 不能直接用 event.get_group_id()：KOOK 适配器里它是**频道 ID**，
+        # 拿它当服务器 ID 去查频道列表会得到 code=40000。
+        ctx = await self._channel_context(event)
+        guild_id = ctx["guild_id"]
         channel_id = self._target_channel_for(guild_id)
+        channel_note = ""
+        if not channel_id:
+            # 没绑定目标频道时自动兜底：服务器只有一个语音频道就直接用它
+            channel_id, channel_note = await self._auto_pick_voice_channel(
+                guild_id, ctx["channel_id"]
+            )
 
         request = _PlayRequest(
             events=[
@@ -1057,16 +1215,13 @@ class KookTtsWelcomePlugin(
             override_text=speak,
         )
         if not channel_id:
-            # 事件没有带出语音频道时，让播报流程用配置里的目标频道；
-            # 两者都空则播报会失败并写诊断日志。
-            self._trace(
-                f"试听请求：channel 未知（绑定={self._target_channel_for(guild_id) or '空'}）"
-            )
+            # 事件没有带出语音频道、自动识别也没选出来：播报会失败并写诊断日志
+            self._trace(f"试听请求：channel 未知（{channel_note}）")
 
         self._enqueue(request)
         yield event.plain_result(
             f"已提交试听：「{speak}」\n"
-            f"目标频道：{channel_id or '未指定（请先配置目标语音频道 ID）'}"
+            f"目标频道：{channel_note or channel_id or '未指定'}"
         )
 
     @filter.command("语音欢迎重载")
@@ -1084,6 +1239,8 @@ class KookTtsWelcomePlugin(
         self._nickname_cache.clear()
         self._channel_cache.clear()
         self._guild_info_cache.clear()
+        self._voice_channel_cache.clear()
+        self._last_voice_channel.clear()
         self._text_channel_cache.clear()
         self._mute_state.clear()
         ok, detail = await self._check_ffmpeg()
@@ -1100,9 +1257,20 @@ class KookTtsWelcomePlugin(
 
     @staticmethod
     def _strip_command(message_str: str, command: str, maxsplit: int = -1) -> list[str]:
-        """去掉指令名（含可能的前缀）后按空白切分参数。"""
-        text = (message_str or "").strip()
-        text = re.sub(rf"^[~/!#]{{0,2}}{re.escape(command)}\s*", "", text)
+        """去掉指令名（含可能的前缀）后按空白切分参数。
+
+        兼容全角空格、``@机器人`` 前缀与 0~2 个指令前缀符（``/ `` ``~`` ``!``
+        ``#``）；指令名后必须紧跟空白或结束，避免把「语音欢迎模板xxx」这种
+        粘连输入误当成合法参数。
+        """
+        text = (message_str or "").replace("\u3000", " ").strip()
+        text = re.sub(r"^(?:@\S+\s+)+", "", text)
+        text = re.sub(
+            rf"^[~/!#]{{0,2}}\s*{re.escape(command)}(?=\s|$)\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
         if not text:
             return []
         return text.split(None, maxsplit) if maxsplit >= 0 else text.split()

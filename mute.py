@@ -28,8 +28,6 @@ from astrbot.api import logger
 
 from .constants import (
     MUTE_POLL_IDLE_SECONDS,
-    MUTE_POLL_MIN_SECONDS,
-    PLUGIN_NAME,
     STATE_ENTER,
     STATE_EXIT,
     STATE_MIC_OFF,

@@ -40,6 +40,11 @@ from .hooking import VoiceStateEvent
 from .kook_api import KookApiError
 from .utils import to_text
 
+try:  # AstrBot 公开路径（astrbot.api.provider.__all__ 已包含 ProviderType）
+    from astrbot.api.provider import ProviderType
+except ImportError:  # pragma: no cover - 兼容 provider 包未导出该名的旧版本
+    from astrbot.core.provider.entities import ProviderType
+
 
 class TtsError(RuntimeError):
     """TTS 合成失败。"""
@@ -306,16 +311,28 @@ class TtsMixin:
         return path
 
     async def _get_tts_provider(self) -> Any:
-        """取 AstrBot 当前使用的 TTS Provider 实例，没有则返回 None。"""
+        """取 AstrBot 当前使用的 TTS Provider 实例，没有则返回 None。
+
+        优先走 ``Context.get_using_tts_provider_async()``（官方封装，会跟随用户在
+        管理面板里选用的 TTS 提供商）；旧版本没有该方法时退回 ``provider_manager``，
+        最后才退回「第一个已加载实例」，保证任何版本都还能出声。
+        """
+        getter = getattr(self.context, "get_using_tts_provider_async", None)
+        if callable(getter):
+            try:
+                provider = await getter()
+                if provider is not None:
+                    return provider
+            except Exception as exc:
+                logger.debug(f"[KOOK TTS欢迎] 获取 TTS Provider 失败：{exc}")
+
         manager = getattr(self.context, "provider_manager", None)
         if manager is None:
             return None
         try:
-            from astrbot.core.provider.entities import ProviderType
-
-            getter = getattr(manager, "get_using_provider_async", None)
-            if getter is not None:
-                provider = await getter(ProviderType.TEXT_TO_SPEECH)
+            legacy_getter = getattr(manager, "get_using_provider_async", None)
+            if legacy_getter is not None:
+                provider = await legacy_getter(ProviderType.TEXT_TO_SPEECH)
             else:
                 provider = manager.get_using_provider(ProviderType.TEXT_TO_SPEECH)
             if provider is not None:
@@ -323,7 +340,7 @@ class TtsMixin:
         except Exception as exc:
             logger.debug(f"[KOOK TTS欢迎] 获取 TTS Provider 失败：{exc}")
 
-        # 退回第一个已加载的 TTS 实例
+        # 最后兜底：随便拿一个已加载的 TTS 实例，总比完全不出声强
         insts = getattr(manager, "tts_provider_insts", None) or []
         return insts[0] if insts else None
 
@@ -396,7 +413,7 @@ class TtsMixin:
     def _tts_cache_path(self, text: str) -> Path:
         """按文本 + 音色哈希生成缓存文件路径。"""
         voice = self._conf_str("playback.edge_voice") or DEFAULT_EDGE_VOICE
-        digest = hashlib.sha256(f"{voice}|{text}".encode("utf-8")).hexdigest()[:20]
+        digest = hashlib.sha256(f"{voice}|{text}".encode()).hexdigest()[:20]
         return self._data_dir / TTS_CACHE_DIR_NAME / f"{digest}.mp3"
 
     # ------------------------------------------------------------------ #

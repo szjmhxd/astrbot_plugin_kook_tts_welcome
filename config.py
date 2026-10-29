@@ -15,8 +15,6 @@ from astrbot.api.star import StarTools
 
 from .constants import (
     CONFIG_LAYOUT_VERSION,
-    DEFAULT_ENTER_TEMPLATE,
-    DEFAULT_EXIT_TEMPLATE,
     DEFAULT_LEAVE_DELAY,
     DEFAULT_MERGE_WINDOW_MS,
     DEFAULT_MULTI_USER_POLICY,
@@ -85,7 +83,10 @@ class ConfigMixin:
     def _conf_int(self, path: str, default: int, minimum: int, maximum: int) -> int:
         """读取整数配置并夹在 [minimum, maximum] 区间内。"""
         value = to_int(self._conf_get(path, default), default)
-        return max(minimum, min(maximum, value))
+        clamped = max(minimum, min(maximum, value))
+        if clamped != value:
+            self._warn_clamped(path, value, clamped, minimum, maximum)
+        return clamped
 
     def _conf_float(
         self, path: str, default: float, minimum: float, maximum: float
@@ -96,7 +97,32 @@ class ConfigMixin:
             value = float(raw)
         except (TypeError, ValueError):
             value = float(default)
-        return max(minimum, min(maximum, value))
+        clamped = max(minimum, min(maximum, value))
+        if clamped != value:
+            self._warn_clamped(path, value, clamped, minimum, maximum)
+        return clamped
+
+    def _warn_clamped(
+        self, path: str, value: Any, clamped: Any, minimum: Any, maximum: Any
+    ) -> None:
+        """配置越界被夹逼时告警，同一项只提醒一次（避免刷屏）。
+
+        静默改值会让管理面板显示与实际生效不一致——用户填 999 秒冷却、
+        实际生效 60 秒，排查时毫无线索，所以这里必须留痕。
+        """
+        warned = getattr(self, "_conf_warned", None)
+        if warned is None:
+            warned = set()
+            self._conf_warned = warned
+        if path in warned:
+            return
+        warned.add(path)
+        message = (
+            f"配置 {path} = {value} 超出允许范围 [{minimum}, {maximum}]，"
+            f"已按 {clamped} 生效；请在管理面板改正，否则显示与实际不一致"
+        )
+        logger.warning(f"[KOOK TTS欢迎] {message}")
+        self._trace(f"配置夹逼：{message}")
 
     # ------------------------------------------------------------------ #
     # 常用配置
@@ -361,13 +387,10 @@ class ConfigMixin:
         if to_int(self._conf_get("_schema_version"), 0) >= CONFIG_LAYOUT_VERSION:
             return
 
-        changed = False
-
         # 1) 远古默认文案升级（在平铺影子键上做，随后随迁移到新路径）
         for key, (legacy_text, new_text) in LEGACY_TEXT_UPGRADE.items():
             if self._conf_str(key) == legacy_text:
                 self._conf_set(key, new_text)
-                changed = True
                 logger.info(
                     f"[KOOK TTS欢迎] 已升级默认文案 {key}：「{legacy_text}」→「{new_text}」"
                 )
@@ -379,7 +402,6 @@ class ConfigMixin:
             if value is None:
                 continue
             self._conf_set(new, value)
-            changed = True
 
         # 3) 旧「启用静音 / 闭麦播报」总开关拆成闭麦 / 静音两个开关
         mute_on = self._conf_bool("mute_notify_enabled", False)

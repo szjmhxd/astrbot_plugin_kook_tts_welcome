@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["__pycache__"]
+
+[tool.ruff.lint]
+# E/F/W 基础错误检查，I import 排序，UP 过时语法，B 常见坑
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

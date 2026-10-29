@@ -205,15 +205,46 @@ class KookApi:
             "GET", "/guild/view", token, params={"guild_id": guild_id}
         )
 
-    async def get_channels(self, token: str, guild_id: str) -> list[dict[str, Any]]:
-        """查询服务器频道列表（``/guild/view`` 没给 channels 时的兜底）。"""
-        data = await self.request(
-            "GET", "/channel/list", token, params={"guild_id": guild_id}
-        )
-        items = data.get("items")
-        if isinstance(items, list):
-            return [item for item in items if isinstance(item, dict)]
-        return []
+    async def get_channels(
+        self,
+        token: str,
+        guild_id: str,
+        channel_type: int | None = None,
+        page_size: int = 50,
+        max_pages: int = 5,
+    ) -> list[dict[str, Any]]:
+        """查询服务器频道列表。
+
+        ⚠️ 坑：``/channel/list`` 的 ``type`` 参数**默认是 1（文字频道）**。
+        不传 ``type`` 只会拿回文字频道，语音频道永远查不到——所以查语音频道
+        必须显式 ``channel_type=2``。这也是「文字能发、语音找不到」的根因。
+
+        ``channel_type`` 为 ``None`` 时不传该参数（等价于只要文字频道，供
+        ``/guild/view`` 的兜底使用）；分页上限 ``max_pages`` 防止异常情况死循环。
+        """
+        items: list[dict[str, Any]] = []
+        page = 1
+        while page <= max_pages:
+            params: dict[str, Any] = {
+                "guild_id": guild_id,
+                "page": page,
+                "page_size": page_size,
+            }
+            if channel_type is not None:
+                params["type"] = channel_type
+            data = await self.request("GET", "/channel/list", token, params=params)
+            batch = data.get("items")
+            if not isinstance(batch, list) or not batch:
+                break
+            items.extend(item for item in batch if isinstance(item, dict))
+            meta = data.get("meta")
+            total_pages = 1
+            if isinstance(meta, dict):
+                total_pages = max(1, to_int(meta.get("page_total"), 1))
+            if page >= total_pages:
+                break
+            page += 1
+        return items
 
     async def guild_mute_list(
         self, token: str, guild_id: str
@@ -292,10 +323,52 @@ class KookApi:
     # ------------------------------------------------------------------ #
 
     async def get_channel(self, token: str, channel_id: str) -> dict[str, Any]:
-        """查询频道信息，返回含 ``name`` 的 Channel 对象。"""
-        return await self.request(
-            "GET", "/channel/view", token, params={"channel_id": channel_id}
-        )
+        """查询频道详情，返回含 ``name`` / ``guild_id`` 的 Channel 对象。
+
+        ⚠️ 官方参数名是 ``target_id``，不是 ``channel_id``（文档
+        「获取频道详情」）。写错虽然有时也能过，但不要赌——先按文档传，
+        失败再退回旧写法兼容个别部署。
+        """
+        try:
+            return await self.request(
+                "GET", "/channel/view", token, params={"target_id": channel_id}
+            )
+        except KookApiError:
+            return await self.request(
+                "GET", "/channel/view", token, params={"channel_id": channel_id}
+            )
+
+    async def get_guilds(
+        self,
+        token: str,
+        page_size: int = 50,
+        max_pages: int = 5,
+    ) -> list[dict[str, Any]]:
+        """机器人已加入的服务器列表（``/guild/list``，分页取全）。
+
+        用于拿不到服务器 ID 时的兜底：只有一个服务器就直接用它。
+        """
+        items: list[dict[str, Any]] = []
+        page = 1
+        while page <= max_pages:
+            data = await self.request(
+                "GET",
+                "/guild/list",
+                token,
+                params={"page": page, "page_size": page_size},
+            )
+            batch = data.get("items")
+            if not isinstance(batch, list) or not batch:
+                break
+            items.extend(item for item in batch if isinstance(item, dict))
+            meta = data.get("meta")
+            total_pages = 1
+            if isinstance(meta, dict):
+                total_pages = max(1, to_int(meta.get("page_total"), 1))
+            if page >= total_pages:
+                break
+            page += 1
+        return items
 
     async def send_message(
         self, token: str, channel_id: str, content: str

@@ -5,6 +5,11 @@ AstrBot 自带的 KOOK 适配器只把聊天消息转成 AstrBot 事件，网关
 额外拿到语音频道的加入 / 退出事件，并预留静音、闭麦等状态扩展点。
 
 挂接可逆：插件卸载或重载时还原原始回调，热重载不会重复播放。
+
+⚠️ 已知限制：``event_callback`` 是 KOOK 适配器的**私有属性**，不在 AstrBot
+的公开插件扩展点里（公开契约只有 ``@filter.*`` 与 ``Context``）。适配器重写
+这个属性（改名字 / 改签名）后，本插件会收不到任何语音事件且不报错，表现为
+「插件在跑但没反应」。升级 AstrBot 后语音播报失效，先查这里。
 """
 
 from __future__ import annotations
@@ -22,7 +27,6 @@ from .constants import (
     KOOK_MUTE_TYPE_MIC,
     KOOK_SYSTEM_MESSAGE_TYPE,
     STATE_ENTER,
-    STATE_EXIT,
     STATE_MIC_OFF,
     STATE_MIC_ON,
     STATE_MUTE,
@@ -107,12 +111,6 @@ def extract_voice_state_event(data: Any) -> VoiceStateEvent | None:
         channel_id=channel_id,
         guild_id=guild_id,
     )
-
-
-def is_exit_event(data: Any) -> bool:
-    """快速判断是不是「退出语音频道」事件（用于机器人自身退出的止损）。"""
-    event = extract_voice_state_event(data)
-    return event is not None and event.state == STATE_EXIT
 
 
 def describe_unmatched_event(data: Any) -> str | None:

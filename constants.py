@@ -7,7 +7,9 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.5.3"
+# 插件版本：仅用于日志与诊断输出。改版本号时务必同步 metadata.yaml 的 version
+# （AstrBot 以 metadata.yaml 为准，这里只保证日志里能看到真实版本）。
+PLUGIN_VERSION = "v0.5.9"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024

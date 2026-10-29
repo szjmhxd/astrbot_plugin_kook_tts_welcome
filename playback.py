@@ -31,8 +31,8 @@ from .constants import (
 from .ffmpeg import build_ffmpeg_args, playback_timeout
 from .hooking import VoiceStateEvent
 from .kook_api import KookApiError, VoiceJoinInfo
-from .utils import ffprobe_available, probe_audio_duration, run_capture, to_text
 from .tts import TtsError
+from .utils import ffprobe_available, probe_audio_duration, run_capture, to_text
 
 
 @dataclass(slots=True)
