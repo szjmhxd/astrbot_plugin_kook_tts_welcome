@@ -1,5 +1,7 @@
 # 网络请求用 aiohttp（AstrBot 本体已内置，此处显式声明）
 aiohttp>=3.8
 # edge-tts 为可选兜底 TTS 引擎：已配置 AstrBot 语音合成提供商时可不装
-# ≥7.2.7 才修复微软 2025-12 端点变更导致的 NoAudioReceived（7.2.2/7.2.3 有坏端点）
-edge-tts>=7.2.7
+# ≥7.3.1 才修复微软 2026-10 端点迁移（speech.platform.bing.com → api.msedgeservices.com，
+# Sec-MS-GEC 令牌升级 v2）；7.2.8 及以下握手一律 403 / NoAudioReceived。
+# 历史：7.2.7 修的是 2025-12 那次端点变更，2026-10 之后已不够。
+edge-tts>=7.3.1

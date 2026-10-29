@@ -62,13 +62,13 @@ POST /api/v3/voice/leave  →  冷却 3 秒，处理下一次事件
 |------|------|
 | AstrBot | ≥ 4.16，KOOK 适配器已启用并在线 |
 | FFmpeg | 已安装，需包含 `libopus` 编码器（启动时自动检测） |
-| TTS | AstrBot 已配置语音合成提供商，**或**安装 `edge-tts`（`pip install "edge-tts>=7.2.7"`；旧版端点已失效，会报 NoAudioReceived） |
+| TTS | AstrBot 已配置语音合成提供商，**或**安装 `edge-tts`（`pip install "edge-tts>=7.3.1"`；2026-10 微软迁移朗读端点，7.2.8 及以下稳定报 403 / NoAudioReceived） |
 | 网络 | 服务器可访问 KOOK 开放平台，并允许向语音服务器发送 UDP 数据 |
 
 ## 安装
 
 1. 将 `astrbot_plugin_kook_tts_welcome/` 放入 AstrBot 的 `data/plugins/`；
-2. `pip install edge-tts`（或在 AstrBot 管理面板配置好语音合成提供商）；
+2. `pip install "edge-tts>=7.3.1"`（或在 AstrBot 管理面板配置好语音合成提供商）；
 3. 安装 FFmpeg（Debian/Ubuntu：`sudo apt install ffmpeg`；Windows：`winget install Gyan.FFmpeg`）；
 4. 重启 AstrBot 或在插件管理中重载。
 
@@ -194,6 +194,13 @@ v0.4.2 起静音 / 闭麦通过网关事件（`add_guild_mute` / `delete_guild_m
 
 合成结果缓存在 `data/plugin_data/astrbot_plugin_kook_tts_welcome/tts_cache/`，同一句话不会重复合成；清空该目录即强制重新合成。
 
+> ⚠️ edge-tts 走的是微软 Edge 朗读的**非公开接口**，微软已两次单方面改端点
+> （2025-12 加 `Sec-MS-GEC` 令牌、2026-10 迁移到 `api.msedgeservices.com` 且令牌升级 v2），
+> 每次都要等 edge-tts 发新版才能用。**要长期稳定，别把 edge-tts 当主引擎**：
+> 在 AstrBot 面板配一个商用/自建 TTS Provider（Azure Speech 与 edge-tts 同为微软神经音色、
+> 有免费额度；国内可用火山引擎 / 腾讯云；离线可用 GPT-SoVITS / Piper），
+> 插件会自动优先用它，edge-tts 只当兜底。
+
 ## 诊断日志
 
 `data/plugin_data/astrbot_plugin_kook_tts_welcome/logs/kook_tts_welcome.log`（路径见 `/语音欢迎`）。单文件超 1 MB 自动轮转；不写 Bot Token。
@@ -203,6 +210,9 @@ v0.4.2 起静音 / 闭麦通过网关事件（`add_guild_mute` / `delete_guild_m
 - **没播报** → 看日志有没有「收到语音事件」；是否被冷却/播放中忽略；文案是否为空；
 - **有播报没声音** → `ffmpeg -encoders | grep opus` 确认 libopus；确认服务器 UDP 出方向放行；
 - **合成失败** → 看日志是 AstrBot TTS 还是 edge-tts 失败；edge-tts 需要能访问微软服务。
+  出现 `403` / `NoAudioReceived` 先查两件事：`edge-tts` 版本是否 ≥ 7.3.1（2026-10 微软换端点，
+  旧版必挂）、配置的音色是否已被微软下架（`edge-tts --list-voices` 核对，2026-09 起下架了
+  晓涵 / 晓辰 / 晓梦 / 晓墨 / 晓秋 / 晓睿 / 晓双 / 晓萱 / 晓颜 / 晓悠 共 10 个中文音色）。
 
 ## 开发
 

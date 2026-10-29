@@ -345,37 +345,50 @@ class TtsMixin:
             return None
 
         last_exc: Exception | str = ""
+        # 先写临时文件再原子替换：save() 中途失败会留下 0 字节 / 半截文件，
+        # 直接写缓存路径会让残骸被下一次误判为「已缓存」
+        temp = target.with_name(target.name + ".part")
         for attempt in range(1, EDGE_TTS_MAX_ATTEMPTS + 1):
+            with contextlib.suppress(OSError):
+                temp.unlink(missing_ok=True)
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 communicate = edge_tts.Communicate(text, voice)
-                await communicate.save(str(target))
+                await communicate.save(str(temp))
             except Exception as exc:  # noqa: BLE001 - edge-tts 异常类型多变，统一兜住
                 last_exc = exc
                 logger.warning(
                     f"[KOOK TTS欢迎] edge-tts 合成失败（{attempt}/{EDGE_TTS_MAX_ATTEMPTS}）：{exc}"
                 )
                 self._trace(f"edge-tts 合成失败（{attempt}/{EDGE_TTS_MAX_ATTEMPTS}）：{exc!r}")
+                with contextlib.suppress(OSError):
+                    temp.unlink(missing_ok=True)
                 if attempt < EDGE_TTS_MAX_ATTEMPTS:
                     await asyncio.sleep(EDGE_TTS_RETRY_DELAY * attempt)
                 continue
 
-            if target.is_file() and target.stat().st_size > 0:
-                self._trace(f"edge-tts 合成成功（{voice}）：{target}")
-                return target
+            if temp.is_file() and temp.stat().st_size > 0:
+                with contextlib.suppress(OSError):
+                    temp.replace(target)
+                    self._trace(f"edge-tts 合成成功（{voice}）：{target}")
+                    return target
 
-            last_exc = "输出了空文件"
+            last_exc = "输出了空文件（音色可能已被微软下架）"
             logger.warning(
                 f"[KOOK TTS欢迎] edge-tts 输出空文件（{attempt}/{EDGE_TTS_MAX_ATTEMPTS}）"
             )
             self._trace(f"edge-tts 输出空文件（{attempt}/{EDGE_TTS_MAX_ATTEMPTS}）")
+            with contextlib.suppress(OSError):
+                temp.unlink(missing_ok=True)
             if attempt < EDGE_TTS_MAX_ATTEMPTS:
                 await asyncio.sleep(EDGE_TTS_RETRY_DELAY * attempt)
 
+
         logger.error(
             f"[KOOK TTS欢迎] edge-tts 合成失败（已重试 {EDGE_TTS_MAX_ATTEMPTS} 次）：{last_exc}"
-            "；若是 NoAudioReceived，通常是 edge-tts 版本过旧（微软端点已变），"
-            "请在容器内执行 pip install -U edge-tts 后重载插件"
+            "；403 / NoAudioReceived 多为 edge-tts 版本过旧（微软 2026-10 迁移朗读端点，"
+            "需 ≥7.3.1，请在容器内 pip install -U \"edge-tts>=7.3.1\" 后重载插件）；"
+            "空文件多为音色已被微软下架，用 edge-tts --list-voices 核对并更换音色"
         )
         self._trace(f"失败：edge-tts 连续 {EDGE_TTS_MAX_ATTEMPTS} 次失败：{last_exc!r}")
         return None
