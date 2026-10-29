@@ -573,7 +573,7 @@ class PlaybackMixin:
 
     async def _join_voice(self, token: str, channel_id: str) -> VoiceJoinInfo:
         """加入语音频道；失败时释放残留连接并重试一次。"""
-        password = self._conf_str("voice_password")
+        password = self._conf_str("connection.voice_password")
         try:
             return await self._api.join_voice(token, channel_id, password=password)
         except KookApiError as exc:

@@ -26,15 +26,12 @@ from astrbot.api import logger
 from .constants import (
     CUSTOM_AUDIO_DIR_NAME,
     DEFAULT_EDGE_VOICE,
-    DEFAULT_ENTER_TEMPLATE,
-    DEFAULT_EXIT_TEMPLATE,
     EDGE_TTS_MAX_ATTEMPTS,
     EDGE_TTS_RETRY_DELAY,
     NICKNAME_CACHE_MAX,
     NICKNAME_CACHE_TTL,
-    STATE_ENTER,
-    STATE_EXIT,
     STATE_LABELS,
+    STATE_VOICE_TEMPLATE_PATH,
     TTS_CACHE_DIR_NAME,
     TTS_TEXT_MAX_CHARS,
     USER_TEMPLATES_FILE_NAME,
@@ -148,14 +145,9 @@ class TtsMixin:
     # ------------------------------------------------------------------ #
 
     def _state_template(self, state: str) -> str:
-        """取某个状态的播报文案模板；未配置时用默认模板，空字符串表示关闭。"""
-        key = f"template_{state}"
-        if key in self.config:
-            return self._conf_str(key)
-        return {
-            STATE_ENTER: DEFAULT_ENTER_TEMPLATE,
-            STATE_EXIT: DEFAULT_EXIT_TEMPLATE,
-        }.get(state, "")
+        """取某个状态的语音播报文案模板；空字符串表示该状态不播语音。"""
+        path = STATE_VOICE_TEMPLATE_PATH.get(state, "")
+        return self._conf_str(path) if path else ""
 
     def _render_text(
         self,
@@ -341,7 +333,7 @@ class TtsMixin:
         失败自动重试：微软端点偶发抖动一次失败很常见；连续失败才放弃，
         并提示升级 edge-tts（旧版本端点失效会稳定报 NoAudioReceived）。
         """
-        voice = self._conf_str("edge_voice") or DEFAULT_EDGE_VOICE
+        voice = self._conf_str("playback.edge_voice") or DEFAULT_EDGE_VOICE
         try:
             import edge_tts  # noqa: PLC0415 - 延迟导入，未安装时不影响其它路径
         except ImportError:
@@ -390,7 +382,7 @@ class TtsMixin:
 
     def _tts_cache_path(self, text: str) -> Path:
         """按文本 + 音色哈希生成缓存文件路径。"""
-        voice = self._conf_str("edge_voice") or DEFAULT_EDGE_VOICE
+        voice = self._conf_str("playback.edge_voice") or DEFAULT_EDGE_VOICE
         digest = hashlib.sha256(f"{voice}|{text}".encode("utf-8")).hexdigest()[:20]
         return self._data_dir / TTS_CACHE_DIR_NAME / f"{digest}.mp3"
 

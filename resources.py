@@ -16,7 +16,7 @@ class ResourcesMixin:
 
     def _resolve_token(self) -> str:
         """Bot Token：优先插件配置，其次从 KOOK 适配器配置读取。"""
-        token = self._conf_str("bot_token")
+        token = self._conf_str("connection.bot_token")
         if token:
             return token
         for adapter in self._iter_kook_adapters():

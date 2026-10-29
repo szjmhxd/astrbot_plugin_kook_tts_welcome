@@ -7,7 +7,7 @@ from __future__ import annotations
 # --------------------------------------------------------------------------- #
 
 PLUGIN_NAME = "astrbot_plugin_kook_tts_welcome"
-PLUGIN_VERSION = "v0.4.3"
+PLUGIN_VERSION = "v0.5.0"
 
 # 诊断日志单文件上限，超过后轮转为 .log.1
 LOG_MAX_BYTES = 1024 * 1024
@@ -50,6 +50,79 @@ KOOK_MUTE_EVENT_DELETE = "delete_guild_mute"
 KOOK_MUTE_EVENT_TYPES = frozenset({KOOK_MUTE_EVENT_ADD, KOOK_MUTE_EVENT_DELETE})
 KOOK_MUTE_TYPE_MIC = 1
 KOOK_MUTE_TYPE_HEADSET = 2
+
+# --------------------------------------------------------------------------- #
+# 配置布局（v0.5.0 起按分组嵌套组织，见 _conf_schema.json）
+# --------------------------------------------------------------------------- #
+
+# 迁移标记：低于此版本时把旧平铺键搬进新嵌套结构
+CONFIG_LAYOUT_VERSION = 2
+
+# 状态 → 语音播报文案的配置路径
+STATE_VOICE_TEMPLATE_PATH = {
+    STATE_ENTER: "welcome_exit.welcome.voice_template",
+    STATE_EXIT: "welcome_exit.exit.voice_template",
+    STATE_MUTE: "mute_mic.mute.mute_voice",
+    STATE_UNMUTE: "mute_mic.mute.unmute_voice",
+    STATE_MIC_OFF: "mute_mic.mic.mic_off_voice",
+    STATE_MIC_ON: "mute_mic.mic.mic_on_voice",
+}
+
+# 状态 → 文字播报文案的配置路径
+STATE_TEXT_TEMPLATE_PATH = {
+    STATE_ENTER: "welcome_exit.welcome.text_template",
+    STATE_EXIT: "welcome_exit.exit.text_template",
+    STATE_MUTE: "mute_mic.mute.mute_text",
+    STATE_UNMUTE: "mute_mic.mute.unmute_text",
+    STATE_MIC_OFF: "mute_mic.mic.mic_off_text",
+    STATE_MIC_ON: "mute_mic.mic.mic_on_text",
+}
+
+# 状态 → 播报开关的配置路径。进入 / 退出的开关只控语音（文字由模版留空控制）；
+# 静音 / 闭麦的开关控制该类的语音 + 文字（每类一个开关，覆盖两个方向）。
+STATE_TOGGLE_PATH = {
+    STATE_ENTER: "welcome_exit.welcome.enabled",
+    STATE_EXIT: "welcome_exit.exit.enabled",
+    STATE_MUTE: "mute_mic.mute.enabled",
+    STATE_UNMUTE: "mute_mic.mute.enabled",
+    STATE_MIC_OFF: "mute_mic.mic.enabled",
+    STATE_MIC_ON: "mute_mic.mic.enabled",
+}
+
+# 旧平铺配置键 → 新嵌套路径（一次性迁移，见 ConfigMixin._migrate_config）
+LEGACY_CONFIG_MAP = {
+    "template_enter": "welcome_exit.welcome.voice_template",
+    "notify_enter_text": "welcome_exit.welcome.text_template",
+    "play_exit": "welcome_exit.exit.enabled",
+    "template_exit": "welcome_exit.exit.voice_template",
+    "notify_exit_text": "welcome_exit.exit.text_template",
+    "template_mute": "mute_mic.mute.mute_voice",
+    "notify_mute_text": "mute_mic.mute.mute_text",
+    "template_unmute": "mute_mic.mute.unmute_voice",
+    "notify_unmute_text": "mute_mic.mute.unmute_text",
+    "template_mic_off": "mute_mic.mic.mic_off_voice",
+    "notify_mic_off_text": "mute_mic.mic.mic_off_text",
+    "template_mic_on": "mute_mic.mic.mic_on_voice",
+    "notify_mic_on_text": "mute_mic.mic.mic_on_text",
+    "mute_poll_interval": "strategy.mute_poll_interval",
+    "multi_user_policy": "strategy.multi_user_policy",
+    "merge_window_ms": "strategy.merge_window_ms",
+    "notify_auto_channel": "strategy.notify_auto_channel",
+    "notify_text_channel_id": "strategy.notify_text_channel_id",
+    "edge_voice": "playback.edge_voice",
+    "volume": "playback.volume",
+    "cooldown": "playback.cooldown",
+    "start_delay_ms": "playback.start_delay_ms",
+    "leave_delay": "playback.leave_delay",
+    "ffmpeg_path": "playback.ffmpeg_path",
+    "diagnostic_log": "playback.diagnostic_log",
+    "bot_token": "connection.bot_token",
+    "voice_password": "connection.voice_password",
+}
+
+
+# 目标语音频道绑定文件（{guild_id: channel_id}，/语音欢迎目标频道 指令维护）
+TARGET_CHANNELS_FILE_NAME = "target_channels.json"
 
 # 静音 / 闭麦状态的中文说明，用于 {mute_type} 占位符
 STATE_LABELS = {
@@ -113,6 +186,14 @@ DEFAULT_NOTIFY_MIC_OFF = "{nickname} 被管理员服务器闭麦"
 DEFAULT_NOTIFY_MIC_ON = "{nickname} 的服务器闭麦已解除"
 LEGACY_NOTIFY_ENTER = "{nickname} 进入了语音频道 {channel}"
 LEGACY_NOTIFY_EXIT = "{nickname} 退出了语音频道 {channel}"
+# 迁移时做旧默认文案升级的键（旧文案 → 新文案）
+LEGACY_TEXT_UPGRADE = {
+    "template_enter": (LEGACY_ENTER_TEMPLATE, DEFAULT_ENTER_TEMPLATE),
+    "template_exit": (LEGACY_EXIT_TEMPLATE, DEFAULT_EXIT_TEMPLATE),
+    "notify_enter_text": (LEGACY_NOTIFY_ENTER, DEFAULT_NOTIFY_ENTER),
+    "notify_exit_text": (LEGACY_NOTIFY_EXIT, DEFAULT_NOTIFY_EXIT),
+}
+
 
 # 静音 / 闭麦播报默认关闭（留空 = 不播报）。开启后需要轮询接口，
 # 且每次状态变化都要进出语音频道，默认不打扰。

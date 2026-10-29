@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.star import StarTools
 
 from .constants import (
+    CONFIG_LAYOUT_VERSION,
     DEFAULT_ENTER_TEMPLATE,
     DEFAULT_EXIT_TEMPLATE,
     DEFAULT_LEAVE_DELAY,
@@ -25,52 +28,70 @@ from .constants import (
     DEFAULT_NOTIFY_MUTE,
     DEFAULT_NOTIFY_UNMUTE,
     DEFAULT_START_DELAY_MS,
-    LEGACY_ENTER_TEMPLATE,
-    LEGACY_EXIT_TEMPLATE,
-    LEGACY_NOTIFY_ENTER,
-    LEGACY_NOTIFY_EXIT,
+    LEGACY_CONFIG_MAP,
+    LEGACY_TEXT_UPGRADE,
     LOG_MAX_BYTES,
     MULTI_USER_POLICIES,
     MUTE_POLL_MIN_SECONDS,
     PLUGIN_NAME,
     PLUGIN_VERSION,
+    STATE_TEXT_TEMPLATE_PATH,
+    STATE_TOGGLE_PATH,
+    TARGET_CHANNELS_FILE_NAME,
 )
-from .utils import to_int
+from .utils import to_bool, to_int, to_text
 
 
 class ConfigMixin:
     """配置读取、目录解析与诊断日志。方法由 main.py 的插件类继承。"""
 
     # ------------------------------------------------------------------ #
-    # 配置读取
+    # 配置读取（支持 a.b.c 嵌套路径）
     # ------------------------------------------------------------------ #
 
-    def _conf_str(self, key: str, default: str = "") -> str:
+    def _conf_get(self, path: str, default: Any = None) -> Any:
+        """按点号路径取配置值；任一层缺失返回 default。"""
+        node: Any = self.config
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return default
+            node = node[part]
+        return default if node is None else node
+
+    def _conf_set(self, path: str, value: Any) -> None:
+        """按点号路径写配置值，中间层缺失时自动创建。"""
+        parts = path.split(".")
+        node: Any = self.config
+        for part in parts[:-1]:
+            child = node.get(part) if isinstance(node, dict) else None
+            if not isinstance(child, dict):
+                child = {}
+                node[part] = child
+            node = child
+        node[parts[-1]] = value
+
+    def _conf_str(self, path: str, default: str = "") -> str:
         """读取字符串配置，None 与两端空白统一处理。"""
-        value = self.config.get(key, default)
+        value = self._conf_get(path, default)
         if value is None:
             return default
         return str(value).strip()
 
-    def _conf_bool(self, key: str, default: bool = True) -> bool:
+    def _conf_bool(self, path: str, default: bool = True) -> bool:
         """读取布尔配置，兼容 WebUI 可能保存的字符串形式。"""
-        value = self.config.get(key, default)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on", "是", "开"}
-        return bool(value)
+        value = self._conf_get(path, default)
+        return to_bool(value, default)
 
-    def _conf_int(self, key: str, default: int, minimum: int, maximum: int) -> int:
+    def _conf_int(self, path: str, default: int, minimum: int, maximum: int) -> int:
         """读取整数配置并夹在 [minimum, maximum] 区间内。"""
-        value = to_int(self.config.get(key, default), default)
+        value = to_int(self._conf_get(path, default), default)
         return max(minimum, min(maximum, value))
 
     def _conf_float(
-        self, key: str, default: float, minimum: float, maximum: float
+        self, path: str, default: float, minimum: float, maximum: float
     ) -> float:
         """读取浮点配置并夹在 [minimum, maximum] 区间内。"""
-        raw = self.config.get(key, default)
+        raw = self._conf_get(path, default)
         try:
             value = float(raw)
         except (TypeError, ValueError):
@@ -86,92 +107,127 @@ class ConfigMixin:
         return self._conf_bool("enabled", True)
 
     @property
-    def _target_channel(self) -> str:
-        return self._conf_str("target_channel_id")
+    def _enabled_guild_ids(self) -> frozenset[str]:
+        """启用范围（目标服务器 ID 集合，空 = 所有服务器）。"""
+        raw = self._conf_str("enabled_guilds")
+        ids = {part.strip() for part in raw.replace("；", ";").split(";")}
+        return frozenset(part for part in ids if part)
+
+    def _guild_enabled(self, guild_id: str) -> bool:
+        """该服务器是否在启用范围内。"""
+        ids = self._enabled_guild_ids
+        return not ids or guild_id in ids
 
     @property
     def _cooldown(self) -> int:
-        return self._conf_int("cooldown", 3, 0, 60)
+        return self._conf_int("playback.cooldown", 3, 0, 60)
 
     @property
     def _volume(self) -> int:
-        return self._conf_int("volume", 100, 0, 100)
+        return self._conf_int("playback.volume", 100, 0, 100)
 
     @property
     def _start_delay_ms(self) -> int:
         """入房到开播的最短间隔（毫秒）。"""
-        return self._conf_int("start_delay_ms", DEFAULT_START_DELAY_MS, 0, 10000)
+        return self._conf_int(
+            "playback.start_delay_ms", DEFAULT_START_DELAY_MS, 0, 10000
+        )
 
     @property
     def _multi_user_policy(self) -> str:
         """多人同时进房时的语音策略：ignore / interrupt / merge。"""
-        value = self._conf_str("multi_user_policy", DEFAULT_MULTI_USER_POLICY).lower()
+        value = self._conf_str(
+            "strategy.multi_user_policy", DEFAULT_MULTI_USER_POLICY
+        ).lower()
         return value if value in MULTI_USER_POLICIES else DEFAULT_MULTI_USER_POLICY
 
     @property
     def _merge_window_ms(self) -> int:
         """合并播报的收集窗口（毫秒）。"""
-        return self._conf_int("merge_window_ms", DEFAULT_MERGE_WINDOW_MS, 0, 30000)
+        return self._conf_int(
+            "strategy.merge_window_ms", DEFAULT_MERGE_WINDOW_MS, 0, 30000
+        )
 
     @property
     def _notify_text_channel_id(self) -> str:
         """兜底文字频道 ID（空 = 交给自动识别）。"""
-        return self._conf_str("notify_text_channel_id")
+        return self._conf_str("strategy.notify_text_channel_id")
 
     @property
     def _notify_auto_channel(self) -> bool:
         """是否自动识别服务器默认文字频道。"""
-        return self._conf_bool("notify_auto_channel", True)
+        return self._conf_bool("strategy.notify_auto_channel", True)
 
     @property
     def _notify_enter_text(self) -> str:
-        return self._conf_str("notify_enter_text", DEFAULT_NOTIFY_ENTER)
+        return self._conf_str(
+            "welcome_exit.welcome.text_template", DEFAULT_NOTIFY_ENTER
+        )
 
     @property
     def _notify_exit_text(self) -> str:
-        return self._conf_str("notify_exit_text", DEFAULT_NOTIFY_EXIT)
+        return self._conf_str("welcome_exit.exit.text_template", DEFAULT_NOTIFY_EXIT)
 
     @property
     def _notify_mute_text(self) -> str:
-        return self._conf_str("notify_mute_text", DEFAULT_NOTIFY_MUTE)
+        return self._conf_str("mute_mic.mute.mute_text", DEFAULT_NOTIFY_MUTE)
 
     @property
     def _notify_unmute_text(self) -> str:
-        return self._conf_str("notify_unmute_text", DEFAULT_NOTIFY_UNMUTE)
+        return self._conf_str(
+            "mute_mic.mute.unmute_text", DEFAULT_NOTIFY_UNMUTE
+        )
 
     @property
     def _notify_mic_off_text(self) -> str:
-        return self._conf_str("notify_mic_off_text", DEFAULT_NOTIFY_MIC_OFF)
+        return self._conf_str("mute_mic.mic.mic_off_text", DEFAULT_NOTIFY_MIC_OFF)
 
     @property
     def _notify_mic_on_text(self) -> str:
-        return self._conf_str("notify_mic_on_text", DEFAULT_NOTIFY_MIC_ON)
+        return self._conf_str("mute_mic.mic.mic_on_text", DEFAULT_NOTIFY_MIC_ON)
+
+    @property
+    def _welcome_voice_enabled(self) -> bool:
+        """欢迎语音开关（只控语音；文字由文字模版留空控制）。"""
+        return self._conf_bool("welcome_exit.welcome.enabled", True)
+
+    @property
+    def _exit_voice_enabled(self) -> bool:
+        """退出语音开关（只控语音；文字由文字模版留空控制）。"""
+        return self._conf_bool("welcome_exit.exit.enabled", False)
+
+    @property
+    def _mic_notify_enabled(self) -> bool:
+        """闭麦播报开关（控制闭麦 / 开麦的语音 + 文字）。"""
+        return self._conf_bool("mute_mic.mic.enabled", False)
 
     @property
     def _mute_notify_enabled(self) -> bool:
-        """静音 / 闭麦播报总开关（网关事件与轮询共用）。"""
-        return self._conf_bool("mute_notify_enabled", False)
+        """静音播报开关（控制静音 / 解除静音的语音 + 文字）。"""
+        return self._conf_bool("mute_mic.mute.enabled", False)
+
+    def _state_announce_enabled(self, state: str) -> bool:
+        """静音 / 闭麦类状态的播报开关（语音 + 文字统一把关）。"""
+        path = STATE_TOGGLE_PATH.get(state, "")
+        return bool(path) and self._conf_bool(path, False)
 
     @property
     def _mute_poll_interval(self) -> int:
-        """静音 / 闭麦轮询间隔（秒），开关未打开时返回 0（= 不轮询）。"""
-        if not self._mute_notify_enabled:
+        """静音 / 闭麦轮询间隔（秒），两类开关都关闭时返回 0（= 不轮询）。"""
+        if not (self._mic_notify_enabled or self._mute_notify_enabled):
             return 0
-        raw = self._conf_int("mute_poll_interval", DEFAULT_MUTE_POLL_SECONDS, 0, 300)
+        raw = self._conf_int(
+            "strategy.mute_poll_interval", DEFAULT_MUTE_POLL_SECONDS, 0, 300
+        )
         return max(MUTE_POLL_MIN_SECONDS, raw)
 
     @property
     def _leave_delay(self) -> int:
-        return self._conf_int("leave_delay", DEFAULT_LEAVE_DELAY, 0, 10)
-
-    @property
-    def _play_exit(self) -> bool:
-        """是否播放退出语音。"""
-        return self._conf_bool("play_exit", False)
+        return self._conf_int("playback.leave_delay", DEFAULT_LEAVE_DELAY, 0, 10)
 
     @property
     def _ffmpeg_path(self) -> str:
-        return self._conf_str("ffmpeg_path") or "ffmpeg"
+        return self._conf_str("playback.ffmpeg_path") or "ffmpeg"
 
     def _ffmpeg_executable(self) -> str:
         """把配置里的 FFmpeg 路径解析成可执行文件（相对路径走 PATH 查找）。"""
@@ -179,6 +235,66 @@ class ConfigMixin:
         if os.path.isabs(path):
             return path
         return shutil.which(path) or path
+
+    def _state_text_template(self, state: str) -> str:
+        """取某个状态的文字播报文案（空字符串表示不发）。"""
+        path = STATE_TEXT_TEMPLATE_PATH.get(state, "")
+        return self._conf_str(path) if path else ""
+
+    # ------------------------------------------------------------------ #
+    # 目标语音频道绑定（每服务器一份，/语音欢迎目标频道 维护）
+    # ------------------------------------------------------------------ #
+
+    def _target_channels_file(self) -> Path:
+        return self._data_dir / TARGET_CHANNELS_FILE_NAME
+
+    def _load_target_channels(self) -> dict[str, str]:
+        """读取 ``target_channels.json``（``{guild_id: voice_channel_id}``）。"""
+        path = self._target_channels_file()
+        if not path.is_file():
+            return {}
+        try:
+            with path.open(encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(f"[KOOK TTS欢迎] 读取目标频道绑定失败：{exc}")
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {to_text(k): to_text(v) for k, v in data.items() if to_text(k)}
+
+    def _save_target_channels(self) -> bool:
+        """落盘 ``target_channels.json``。"""
+        try:
+            self._target_channels_file().parent.mkdir(parents=True, exist_ok=True)
+            with self._target_channels_file().open("w", encoding="utf-8") as handle:
+                json.dump(
+                    getattr(self, "_target_channels", {}), handle, ensure_ascii=False, indent=2
+                )
+            return True
+        except OSError as exc:
+            logger.warning(f"[KOOK TTS欢迎] 保存目标频道绑定失败：{exc}")
+            self._trace(f"保存目标频道绑定失败：{exc!r}")
+            return False
+
+    def _bind_target_channel(self, guild_id: str, channel_id: str) -> bool:
+        """绑定 / 解绑某服务器的目标语音频道（空频道 ID = 解绑）。"""
+        if not guild_id:
+            return False
+        store = getattr(self, "_target_channels", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._target_channels = store
+        if channel_id:
+            store[guild_id] = channel_id
+        else:
+            store.pop(guild_id, None)
+        return self._save_target_channels()
+
+    def _target_channel_for(self, guild_id: str) -> str:
+        """该服务器的目标语音频道：每服务器绑定 > 旧版全局配置 > 空（跟随事件）。"""
+        bound = getattr(self, "_target_channels", {}).get(guild_id, "")
+        return bound or self._conf_str("target_channel_id")
 
     # ------------------------------------------------------------------ #
     # 目录
@@ -203,7 +319,11 @@ class ConfigMixin:
 
     def _log_startup(self) -> None:
         """在 AstrBot 日志与诊断日志里输出启动配置摘要。"""
-        channel = self._target_channel or "自动跟随事件频道"
+        guild_scope = (
+            "、".join(sorted(self._enabled_guild_ids))
+            if self._enabled_guild_ids
+            else "全部服务器"
+        )
         bound = len(getattr(self, "_notify_channels", {}) or {})
         if bound:
             notify_desc = f"每服务器绑定 {bound} 个"
@@ -217,11 +337,14 @@ class ConfigMixin:
         mute = self._mute_poll_interval
         mute_desc = f"每 {mute}s 轮询服务器静音名单" if mute else "关闭"
         summary = (
-            f"已加载 {PLUGIN_VERSION}：启用={self._enabled}，监听频道={channel}，"
-            f"退出播报={'开' if self._play_exit else '关'}，"
+            f"已加载 {PLUGIN_VERSION}：启用={self._enabled}，启用范围={guild_scope}，"
+            f"欢迎语音={'开' if self._welcome_voice_enabled else '关'}，"
+            f"退出语音={'开' if self._exit_voice_enabled else '关'}，"
             f"音量={self._volume}，冷却={self._cooldown}s，"
             f"启动延迟={self._start_delay_ms}ms，尾部静音={self._leave_delay}s，"
-            f"文字播报={notify_desc}，静音闭麦播报={mute_desc}"
+            f"文字播报={notify_desc}，静音闭麦播报="
+            f"闭麦{'开' if self._mic_notify_enabled else '关'}/"
+            f"静音{'开' if self._mute_notify_enabled else '关'}（{mute_desc}）"
         )
         logger.info(f"[KOOK TTS欢迎] {summary}")
         self._trace(f"插件加载：{summary}")
@@ -229,56 +352,51 @@ class ConfigMixin:
         self._trace(f"诊断日志：{self._log_file}")
 
     def _migrate_config(self) -> None:
-        """把历史版本写入配置的旧默认文案升级为新默认。
+        """一次性迁移：v0.5.0 起配置按分组嵌套，把旧平铺键搬进新结构。
 
-        只在当前值与旧默认**完全一致**时替换；用户自己改过的文案不动。
+        旧键在 _conf_schema.json 中以 invisible 影子键保留（AstrBot 加载时
+        会清掉 schema 之外的键，必须留着才能读到旧值）。迁移完成后写入
+        ``_schema_version`` 标记，之后不再执行。
         """
-        migrations = (
-            ("template_enter", LEGACY_ENTER_TEMPLATE, DEFAULT_ENTER_TEMPLATE),
-            ("template_exit", LEGACY_EXIT_TEMPLATE, DEFAULT_EXIT_TEMPLATE),
-            ("notify_enter_text", LEGACY_NOTIFY_ENTER, DEFAULT_NOTIFY_ENTER),
-            ("notify_exit_text", LEGACY_NOTIFY_EXIT, DEFAULT_NOTIFY_EXIT),
-        )
+        if to_int(self._conf_get("_schema_version"), 0) >= CONFIG_LAYOUT_VERSION:
+            return
+
         changed = False
-        for key, legacy, new in migrations:
-            if self._conf_str(key) == legacy:
-                self.config[key] = new
+
+        # 1) 远古默认文案升级（在平铺影子键上做，随后随迁移到新路径）
+        for key, (legacy_text, new_text) in LEGACY_TEXT_UPGRADE.items():
+            if self._conf_str(key) == legacy_text:
+                self._conf_set(key, new_text)
                 changed = True
                 logger.info(
-                    f"[KOOK TTS欢迎] 已升级默认文案 {key}：「{legacy}」→「{new}」"
+                    f"[KOOK TTS欢迎] 已升级默认文案 {key}：「{legacy_text}」→「{new_text}」"
                 )
-                self._trace(f"配置迁移：{key} 「{legacy}」→「{new}」")
+                self._trace(f"配置迁移：{key} 「{legacy_text}」→「{new_text}」")
 
-        # v0.4.1 之前用「间隔 > 0」表示开启静音播报，迁移到独立开关；
-        # 间隔为 0 但填过静音文案的，说明用户想要这个功能，一并开启
-        if "mute_notify_enabled" not in self.config:
-            old_interval = to_int(self.config.get("mute_poll_interval"), 0)
-            has_template = any(
-                self._conf_str(key)
-                for key in (
-                    "template_mute",
-                    "template_unmute",
-                    "template_mic_off",
-                    "template_mic_on",
-                )
-            )
-            if old_interval > 0 or has_template:
-                self.config["mute_notify_enabled"] = True
-                changed = True
-                logger.info(
-                    "[KOOK TTS欢迎] 已迁移静音播报开关："
-                    f"原轮询间隔 {old_interval}s"
-                    f"{'，已填静音文案' if has_template and old_interval <= 0 else ''}"
-                    "，视为开启"
-                )
-                self._trace(f"配置迁移：静音播报开关 = 开（原间隔 {old_interval}s）")
+        # 2) 平铺 → 嵌套（旧键与新键默认值一致，全新安装时等价于无操作）
+        for old, new in LEGACY_CONFIG_MAP.items():
+            value = self._conf_get(old)
+            if value is None:
+                continue
+            self._conf_set(new, value)
+            changed = True
 
-        if changed:
-            self._save_config("升级默认文案")
+        # 3) 旧「启用静音 / 闭麦播报」总开关拆成闭麦 / 静音两个开关
+        mute_on = self._conf_bool("mute_notify_enabled", False)
+        self._conf_set("mute_mic.mic.enabled", mute_on)
+        self._conf_set("mute_mic.mute.enabled", mute_on)
+
+        self._conf_set("_schema_version", CONFIG_LAYOUT_VERSION)
+        logger.info(
+            "[KOOK TTS欢迎] 配置已迁移到 v0.5 分组布局"
+            f"（闭麦播报={'开' if mute_on else '关'}，静音播报={'开' if mute_on else '关'}）"
+        )
+        self._trace(f"配置迁移：布局版本 → {CONFIG_LAYOUT_VERSION}")
+        self._save_config("迁移配置到分组布局")
 
     def _trace(self, message: str) -> None:
         """把诊断信息追加到插件日志文件（不含 Bot Token）。"""
-        if not self._conf_bool("diagnostic_log", True):
+        if not self._conf_bool("playback.diagnostic_log", True):
             return
         log_file = getattr(self, "_log_file", None)
         if log_file is None:
