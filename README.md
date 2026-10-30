@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="KOOK TTS 语音欢迎" width="128">
+</p>
+
 # KOOK TTS 语音欢迎
 
 > 成员进入 KOOK 语音频道时，机器人自动加入、**按用户昵称实时合成欢迎语音（TTS）**并播放，播放完毕后立即离开。
