@@ -2,6 +2,12 @@
 
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-11-04
+
+### 变更
+
+- 移除 `metadata.yaml` 中的 `astrbot_version` 上限约束（原 `>=4.16,<5`），避免 AstrBot 后续大版本被误判为不兼容而无法安装。最低版本要求仍为 4.16。
+
 ## [1.0.0] - 2026-10-29
 
 正式版，功能冻结。v0.5.4 - v0.5.9 的规范整改与缺陷修复全部并入。
